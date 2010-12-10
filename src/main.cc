@@ -192,7 +192,12 @@ static void append_node_adjlist
 {
   list<node_t*>::const_iterator pos = node->adjlist.begin();
   list<node_t*>::const_iterator end = node->adjlist.end();
-  for (; pos != end; ++pos) to_visit.push_back(*pos);
+
+  for (; pos != end; ++pos)
+  {
+    if ((*pos)->is_marked() == true) continue ;
+    to_visit.push_back(*pos);
+  }
 }
 
 
@@ -216,8 +221,6 @@ static unsigned int find_shortest_path_seq
     {
       node_t* const node = to_visit[0].front();
       to_visit[0].pop_front();
-
-      if (node->is_marked() == true) continue ;
 
       if (node == to) return depth;
 
