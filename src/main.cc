@@ -16,10 +16,13 @@ using std::list;
 using std::vector;
 
 
+#define CONFIG_SEQUENTIAL 1
+#define CONFIG_PARALLEL 0
+#define CONFIG_SEQ_GRAIN 128
 #define CONFIG_NODE_COUNT 30000
 #define CONFIG_NODE_DEGREE 10
 #define CONFIG_MAX_THREAD 32
-#define CONFIG_PATH_DEPTH 100
+#define CONFIG_PATH_DEPTH 10
 #define CONFIG_DEBUG 1
 #define CONFIG_ITER 10
 
@@ -146,17 +149,14 @@ static void make_a_path
 
   node_t* prev = a;
 
-  if (depth > 1)
+  for (; depth > 1; --depth)
   {
-    for (; depth; --depth)
-    {
-      node_t* const node = graph.at(rand() % graph.node_count());
+    node_t* const node = graph.at(rand() % graph.node_count());
 
-      prev->add_adj(node);
-      node->add_adj(prev);
+    prev->add_adj(node);
+    node->add_adj(prev);
 
-      prev = node;
-    }
+    prev = node;
   }
 
   if (prev->has_adj(b) == false)
@@ -185,66 +185,181 @@ static void generate_random_graph
 }
 
 
-#if 1 // sequential version
+#if CONFIG_SEQUENTIAL // sequential version
 
-typedef struct path_node
+static void append_node_adjlist
+(node_t* node, list<node_t*>& to_visit)
 {
-  struct path_node* prev;
-  node_t* node;
-
-  path_node(path_node* _prev, node_t* _node)
-    : prev(_prev), node(_node) {}
-
-  path_node(node_t* _node)
-    : prev(NULL), node(_node) {}
-
-} path_node_t;
-
-
-static unsigned int count_path_depth
-(const path_node_t* pos)
-{
-  unsigned int depth = 0;
-  for (; pos != NULL; pos = pos->prev)
-    ++depth;
-  return depth;
+  list<node_t*>::const_iterator pos = node->adjlist.begin();
+  list<node_t*>::const_iterator end = node->adjlist.end();
+  for (; pos != end; ++pos) to_visit.push_back(*pos);
 }
 
-
-static void free_path_node_list
-(list<path_node_t*>& l)
-{
-  list<path_node_t*>::const_iterator pos = l.begin();
-  list<path_node_t*>::const_iterator end = l.end();
-  for (; pos != end; ++pos)
-    delete *pos;
-}
-
-
-static void add_path_node_adjlist
-(
- path_node_t* path_node,
- list<path_node_t*>& to_visit
-)
-{
-  list<node_t*>::const_iterator pos = path_node->node->adjlist.begin();
-  list<node_t*>::const_iterator end = path_node->node->adjlist.end();
-
-  for (; pos != end; ++pos)
-    to_visit.push_back(new path_node_t(path_node, *pos));
-}
 
 static unsigned int find_shortest_path_seq
 (graph_t& g, node_t* from, node_t* to)
 {
-  // father child relation
+  // current and levels
+  list<node_t*> to_visit[2];
+  unsigned int depth = 0;
+
+  // bootstrap algorithm
+  to_visit[1].push_front(from);
+
+  // while next level not empty
+  while (to_visit[1].empty() == false)
+  {
+    // process nodes at level
+    to_visit[0].swap(to_visit[1]);
+
+    while (to_visit[0].empty() == false)
+    {
+      node_t* const node = to_visit[0].front();
+      to_visit[0].pop_front();
+
+      if (node->is_marked() == true) continue ;
+
+      if (node == to) return depth;
+
+      node->mark();
+
+      append_node_adjlist(node, to_visit[1]);
+    }
+
+    ++depth;
+  }
+
+  return 0;
+}
+
+#endif // CONFIG_SEQUENTIAL
+
+
+#if CONFIG_PARALLEL // parallel version
+
+// parallel, stealable work
+typedef struct par_work
+{
+  volatile list<path_node_t*>* to_visit __attiribute__((aligned));
+} par_work_t;
+
+typedef struct thief_work
+{
+  vector<path_node_t*> to_visit;
+  node_t* to_find;
+} thief_work_t, seq_work_t;
+
+typedef struct thief_result
+{
+  list<path_node_t*> adj_nodes;
+  bool is_found;
+} thief_result_t;
+
+static void initialize_par_work(par_work_t* work)
+{
+  work->to_visit = NULL;
+}
+
+static void set_par_work
+(par_work_t* work, list<path_node_t*>* to_visit)
+{
+  work->to_visit = to_visit;
+}
+
+static path_node_t* pop_par_work(par_work_t* work)
+{
+}
+
+static int split_par_work
+(kaapi_stealcontext_t* sc, int nreq, kaapi_request_t* req, void* args)
+{
+  /* victim work */
+  par_work_t* const vw = (work_t*)args;
+  
+  /* stolen range */
+  kaapi_workqueue_index_t i, j;
+  kaapi_workqueue_index_t range_size;
+  
+  /* reply count */
+  int nrep = 0;
+  
+  /* size per request */
+  kaapi_workqueue_index_t unit_size;
+  
+redo_steal:
+  /* do not steal if range size <= PAR_GRAIN */
+#define CONFIG_PAR_GRAIN 128
+  range_size = kaapi_workqueue_size(&vw->cr);
+  if (range_size <= CONFIG_PAR_GRAIN)
+    return 0;
+  
+  /* how much per req */
+  unit_size = range_size / (nreq + 1);
+  if (unit_size == 0)
+  {
+    nreq = (range_size / CONFIG_PAR_GRAIN) - 1;
+    unit_size = CONFIG_PAR_GRAIN;
+  }
+  
+  /* perform the actual steal. if the range
+   changed size in between, redo the steal
+   */
+  if (kaapi_workqueue_steal(&vw->cr, &i, &j, nreq * unit_size))
+    goto redo_steal;
+  
+  for (; nreq; --nreq, ++req, ++nrep, j -= unit_size)
+  {
+    /* for reduction, a result is needed. take care of initializing it */
+    kaapi_taskadaptive_result_t* const ktr =
+    kaapi_allocate_thief_result(req, sizeof(thief_work_t), NULL);
+    
+    /* thief work: not adaptive result because no preemption is used here  */
+    thief_work_t* const tw = kaapi_reply_init_adaptive_task
+    ( sc, req, (kaapi_task_body_t)thief_entrypoint, sizeof(thief_work_t), ktr );
+    tw->key = vw->key;
+    tw->beg = vw->array+j-unit_size;
+    tw->end = vw->array+j;
+    tw->res = 0;
+    
+    /* initialize ktr task may be preempted before entrypoint */
+    ((thief_work_t*)ktr->data)->beg = tw->beg;
+    ((thief_work_t*)ktr->data)->end = tw->end;
+    ((thief_work_t*)ktr->data)->res = 0;
+    
+    /* reply head, preempt head */
+    kaapi_reply_pushhead_adaptive_task(sc, req);
+  }
+  
+  return nrep;
+}
+
+static bool common_entry
+(list<path_node_t*>& to_visit, list<path_node_t*>& adj_nodes)
+{
+  // to_visit, input. the list of path node to visit.
+  // adj_nodes, output. filled with a merge of all adj list.
+
+  vector<path_node_t*> pos = to_visit.begin();
+  vector<path_node_t*> end = to_visit.end();
+
+  for (; pos != end; ++pos)
+  {
+    if (pos->node == to_find) return true;
+    add_path_node_adjlist(*pos, adj_nodes);
+  }
+
+  return false;
+}
+
+static void thief_entry(thief_work_t* work)
+{
   list<path_node_t*> to_visit;
   list<path_node_t*> visited;
   unsigned int path_depth = 0;
 
   to_visit.push_front(new path_node_t(from));
 
-  while (to_visit.empty() == false)
+  while (twork->to_visit.empty() == false)
   {
     path_node_t* const path_node = to_visit.front();
 
@@ -271,69 +386,90 @@ static unsigned int find_shortest_path_seq
   return path_depth;
 }
 
-#endif // sequential
-
-
-#if 0 // parallel version
-
-typedef struct thief_work
+static void reduce_thief
+(kaapi_stealcontext_t* sc, void* targ, void* tdata, size_t tsize, void* varg)
 {
-  list<node_t*> nodes;
-  node_t* to_find;
-} thief_work_t;
-
-typedef struct thief_res
-{
-  list<node_t*> to_visit;
-  node_t* found;
-} thief_res_t;
-
-static void thief_entry(void* p)
-{
-  thief_res_t* const r = static_cast<thief_res_t*>
-    (kaapi_get_thief_result(sc));
-  thief_work_t* const w = static_cast<thief_work_t*>(p);
-
-  list<node_t*>::const_iterator pos = w->nodes.begin();
-  list<node_t*>::const_iterator end = w->nodes.end();
-
-  // find work->to_find in work->nodes
-  for (; pos != end; pos = pos->next)
+  /* victim work */
+  work_t* const vw = (work_t*)varg;
+  
+  /* thief work */
+  thief_work_t* const tw = (thief_work_t*)tdata;
+  
+  /* thief range continuation */
+  kaapi_workqueue_index_t beg, end;
+  
+  /* if the master already has a result, the
+   reducer purpose is only to abort thieves
+   */
+  if (vw->res != (kaapi_workqueue_index_t)-1)
+    return 0;
+  
+  /* check if the thief found a result */
+  if (tw->res != 0)
   {
-    const node_t* const node = *pos;
-    if (node == w->to_find)
-    {
-      r->to_find = node;
-      return ;
-    }
-
-    // mark the node
-    node->mark;
-
-    // add adj list to visit
-    r->to_visit += node->adj_nodes;
+    /* do not continue the work */
+    vw->res = tw->res - vw->array;
+    return 0;
   }
+  
+  /* otherwise, continue preempted thief work */
+  beg = (kaapi_workqueue_index_t)(tw->beg - vw->array);
+  end = (kaapi_workqueue_index_t)(tw->end - vw->array);
+  kaapi_workqueue_set(&vw->cr, beg, end);
+  
+  return 0;
 }
 
-static void reducer()
-{
-  // node found
-  if (tres->to)
-  {
-    vres->is_found = 1;
-    return ;
-  }
+static void abort_thief
+(kaapi_stealcontext_t* sc, void* targ, void* tdata, size_t tsize, void* varg)
+{ return ; }
 
-  merge(vres->to_visit, tres->to_visit);
-}
-
-
-
-static path_t* find_shortest_path_par
+static unsigned int find_shortest_path_par
 (graph_t* graph, node_t* a, node_t* b)
 {
-  // allocate metas
-  // enqueue start node
+  // todo: free the lists
+
+  par_work_t* par_work;
+  seq_work_t* seq_work;
+
+  // father child relation
+  list<path_node_t*> to_visit;
+  list<path_node_t*> visited;
+  unsigned int path_depth = 0;
+
+  par_work->to_visit.push_front(new path_node_t(from));
+
+  while (true)
+  {
+  continue_work:
+    if (pop_par_work(par_work, to_visit) == true)
+    {
+    }
+
+    if (preempt_thief())
+    {
+      reduce_thief(ktr, , to_visit);
+
+      if (foo->is_found == true)
+      {
+	path_depth = ;
+	goto preempt_return ;
+      }
+
+      goto continue_work;
+    }
+
+    // everything done for the current neighborhood
+    // set to_visit as the parallel work
+
+    set_par_work(to_visit);
+  }
+
+ preempt_return:
+
+  while (...) abort_thief();
+
+  return path_depth;
 }
 
 #endif // parallel version
@@ -347,7 +483,7 @@ static void peek_random_pair
 }
 
 
-static void initialize_stuff()
+static void initialize_stuff(void)
 {
   srand(getpid() * time(0));
 }
@@ -370,12 +506,25 @@ int main(int ac, char** av)
   {
     g.unmark_nodes();
 
+#if CONFIG_SEQUENTIAL
     gettimeofday(&tms[0], NULL);
-    const unsigned int depth = find_shortest_path_seq(g, from, to);
+    const unsigned int seq_depth = find_shortest_path_seq(g, from, to);
     gettimeofday(&tms[1], NULL);
     timersub(&tms[1], &tms[0], &tms[2]);
+    double seq_usecs = (double)tms[2].tv_sec * 1E6 + (double)tms[2].tv_usec;
+    printf("%u %lf ", seq_depth, seq_usecs);
+#endif
 
-    printf("found %u in %lf usecs\n", depth, (double)tms[2].tv_sec * 1E6 + (double)tms[2].tv_usec);
+#if CONFIG_PARALLEL
+    gettimeofday(&tms[0], NULL);
+    const unsigned int par_depth = find_shortest_path_par(g, from, to);
+    gettimeofday(&tms[1], NULL);
+    timersub(&tms[1], &tms[0], &tms[2]);
+    double par_usecs = (double)tms[2].tv_sec * 1E6 + (double)tms[2].tv_usec;
+    printf("%u %lf ", par_depth, par_usecs);
+#endif
+
+    printf("\n");
   }
 
   return 0;
