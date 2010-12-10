@@ -30,7 +30,12 @@ using std::vector;
 typedef struct node
 {
   list<struct node*> adjlist;
+
+#if CONFIG_PARALLEL
+  volatile bool state __attribute__((aligned));
+#else
   bool state;
+#endif
 
 #if CONFIG_DEBUG
   unsigned int id;
@@ -49,24 +54,26 @@ typedef struct node
   }
 
   void add_adj(struct node* adj)
-  {
-    adjlist.push_back(adj);
-  }
-
-  bool is_marked() const
-  {
-    return state;
-  }
-
-  void mark()
-  {
-    state = true;
-  }
+  { adjlist.push_back(adj); }
 
   void unmark()
-  {
-    state = false;
+  { state = false; }
+
+#if CONFIG_PARALLEL
+  bool mark_ifnot()
+  { return __bool_compare_and_swap(&state, 0, 1); }
+#else
+  bool mark_ifnot()
+  { 
+    if (state == false)
+    {
+      state = true;
+      return true;
+    }
+    return false;
   }
+#endif
+
 
 } node_t;
 
@@ -187,7 +194,7 @@ static void generate_random_graph
 
 #if CONFIG_SEQUENTIAL // sequential version
 
-static void append_node_adjlist
+static void append_node_adjlist_seq
 (node_t* node, list<node_t*>& to_visit)
 {
   list<node_t*>::const_iterator pos = node->adjlist.begin();
@@ -195,8 +202,8 @@ static void append_node_adjlist
 
   for (; pos != end; ++pos)
   {
-    if ((*pos)->is_marked() == true) continue ;
-    to_visit.push_back(*pos);
+    if ((*pos)->mark_ifnot() == true)
+      to_visit.push_back(*pos);
   }
 }
 
@@ -224,9 +231,7 @@ static unsigned int find_shortest_path_seq
 
       if (node == to) return depth;
 
-      node->mark();
-
-      append_node_adjlist(node, to_visit[1]);
+      append_node_adjlist_seq(node, to_visit[1]);
     }
 
     ++depth;
@@ -427,52 +432,107 @@ static void abort_thief
 (kaapi_stealcontext_t* sc, void* targ, void* tdata, size_t tsize, void* varg)
 { return ; }
 
+
+static void abort_thieves
+(kaapi_stealcontext_t* ksc)
+{
+}
+
+
+// reduction
+
+static void reduce_thief
+(kaapi_stealcontext_t* sc, void* targ, void* tdata, size_t tsize, void* varg)
+{
+  // victim results
+  work_t* const vres = (bsf_result_t*)varg;
+  
+  // thief results
+  thief_work_t* const tres = (bsf_result_t*)tdata;
+
+  if (vres->is_found == true)
+  {
+    tres->is_found = true;
+    return true;
+  }
+
+  vres->to_visit.splice(0, tres->to_visit);
+}
+
+static bool reduce_thieves
+(kaapi_stealcontext_t* ksc, list<node_t*>& to_visit)
+{
+  bsf_result_t res;
+
+  res.is_found = false;
+  res.to_visit = to_visit;
+
+  while (preempt_thief(&res, reducer))
+  {
+    if (res.is_found == true)
+    {
+      // preempt all thieves, runtime constraint
+      abort_thieves(ksc);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
+// core routines
+
+static void append_node_adjlist_par
+(node_t* node, list<node_t*>& to_visit)
+{
+  list<node_t*>::const_iterator pos = node->adjlist.begin();
+  list<node_t*>::const_iterator end = node->adjlist.end();
+
+  for (; pos != end; ++pos)
+  {
+    if ((*pos)->mark_ifnot() == true)
+      to_visit.push_back(*pos);
+  }
+}
+
 static unsigned int find_shortest_path_par
 (graph_t* graph, node_t* a, node_t* b)
 {
-  // todo: free the lists
+  // current and levels
+  list<node_t*> to_visit[2];
+  unsigned int depth = 0;
 
-  par_work_t* par_work;
-  seq_work_t* seq_work;
+  // bootstrap algorithm
+  to_visit[1].push_front(from);
 
-  // father child relation
-  list<path_node_t*> to_visit;
-  list<path_node_t*> visited;
-  unsigned int path_depth = 0;
-
-  par_work->to_visit.push_front(new path_node_t(from));
-
-  while (true)
+  // while next level not empty
+  while (to_visit[1].empty() == false)
   {
-  continue_work:
-    if (pop_par_work(par_work, to_visit) == true)
-    {
-    }
+    // process nodes at level
+    to_visit[0].swap(to_visit[1]);
 
-    if (preempt_thief())
+    while (to_visit[0].empty() == false)
     {
-      reduce_thief(ktr, , to_visit);
+      node_t* const node = to_visit[0].front();
+      to_visit[0].pop_front();
 
-      if (foo->is_found == true)
+      if (node == to)
       {
-	path_depth = ;
-	goto preempt_return ;
+	abort_thieves(sc);
+	return depth;
       }
 
-      goto continue_work;
+      append_node_adjlist_par(node, to_visit[1]);
     }
 
-    // everything done for the current neighborhood
-    // set to_visit as the parallel work
+    if (reduce_thieves(sc, to_visit[0]) == true)
+      return depth;
 
-    set_par_work(to_visit);
+    ++depth;
   }
 
- preempt_return:
-
-  while (...) abort_thief();
-
-  return path_depth;
+  return 0;
 }
 
 #endif // parallel version
