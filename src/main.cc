@@ -17,7 +17,7 @@ using std::vector;
 
 
 #define CONFIG_SEQUENTIAL 1
-#define CONFIG_PARALLEL 0
+#define CONFIG_PARALLEL 1
 #define CONFIG_SEQ_GRAIN 128
 #define CONFIG_NODE_COUNT 30000
 #define CONFIG_NODE_DEGREE 10
@@ -61,7 +61,7 @@ typedef struct node
 
 #if CONFIG_PARALLEL
   bool mark_ifnot()
-  { return __bool_compare_and_swap(&state, 0, 1); }
+  { return __sync_bool_compare_and_swap(&state, 0, 1); }
 #else
   bool mark_ifnot()
   { 
@@ -245,6 +245,8 @@ static unsigned int find_shortest_path_seq
 
 #if CONFIG_PARALLEL // parallel version
 
+#include "kaapi.h"
+
 // reduction
 
 typedef struct victim_result
@@ -286,10 +288,10 @@ static void reduce_thief
   if (tres->is_found == true)
   {
     vres->is_found = true;
-    return true;
+    return ;
   }
 
-  vres->to_visit->splice(0, tres->to_visit);
+  vres->to_visit.splice(0, tres->to_visit);
 }
 
 static bool reduce_thieves
@@ -314,6 +316,35 @@ static bool reduce_thieves
   return false;
 }
 
+// parallel work
+
+typedef struct parallel_work
+{
+  volatile unsigned long lok __attribute__((aligned(64)));
+  list<node_t*> nodes;
+  node_t* to_find;
+
+  parallel_work() : lok(0) {}
+
+  void lock()
+  {
+    while (__sync_bool_compare_and_swap(&lok, 0, 1))
+      __asm__ __volatile__ ("pause \n\t");
+  }
+
+  void unlock() { lok = 0; }
+
+  node_t* pop()
+  {
+    lock();
+    node_t* const node = nodes.front();
+    if (node != NULL) nodes.pop_front();
+    unlock();
+    return node;
+  }
+
+} parallel_work_t;
+
 // splitter
 
 typedef struct thief_work
@@ -322,7 +353,7 @@ typedef struct thief_work
   node_t* to;
 
   thief_work(node_t* _from, node_t* _to)
-    : from(_from), _to(to) {}
+    : from(_from), to(_to) {}
 
 } thief_work_t;
 
@@ -330,22 +361,22 @@ static void thief_entrypoint
 (void* args, kaapi_thread_t* thread, kaapi_stealcontext_t* ksc)
 {
   thief_work_t* const work = (thief_work_t*)args;
-  thief_result_t* const res = kaapi_adaptive_result_data(ksc);
+  thief_result_t* const res = (thief_result_t*)kaapi_adaptive_result_data(ksc);
 
   if (work->from == work->to) { res->is_found = true; return ; }
 
-  append_node_adjlist(work->node, res->to_visit);
+  append_node_adjlist(work->from, res->to_visit);
 }
 
 static int splitter
 (kaapi_stealcontext_t* ksc, int nreq, kaapi_request_t* req, void* args)
 {
-  work_t* const vw = (work_t*)args;
+  parallel_work_t* const par_work = (parallel_work_t*)args;
 
   int nrep = 0;
   for (; nreq; --nreq, ++nrep)
   {
-    if ((node = pop(par_work)) == NULL) break ;
+    if ((node = par_work->pop()) == NULL) break ;
 
     kaapi_taskadaptive_result_t* const ktr =
       kaapi_allocate_thief_result(req, sizeof(thief_result_t), NULL);
@@ -354,6 +385,8 @@ static int splitter
     thief_work_t* const tw = kaapi_reply_init_adaptive_task
       (ksc, req, (kaapi_task_body_t)thief_entrypoint, sizeof(thief_work_t), ktr);
     new (tw) thief_work_t(node);
+    tw->from = node;
+    tw->to = par_work->to_find;
 
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }
@@ -362,31 +395,32 @@ static int splitter
 }
 
 static unsigned int find_shortest_path_par
-(graph_t* graph, node_t* a, node_t* b)
+(graph_t& graph, node_t* from, node_t* to)
 {
   // kaapi related
   kaapi_thread_t* const thread = kaapi_self_thread();
-  kaapi_taskadaptive_result_t* ktr;
   kaapi_stealcontext_t* ksc;
 
-  // current and levels
-  list<node_t*> to_visit
-  unsigned int depth = 0;
-
   // bootstrap algorithm
-  par_work_t par_work;
+  parallel_work_t par_work;
   ksc = kaapi_task_begin_adaptive
     (thread, KAAPI_SC_CONCURRENT | KAAPI_SC_PREEMPTION, splitter, &par_work);
+  par_work.to_find = to;
+
+  list<node_t*> to_visit;
+  unsigned int depth = 0;
+
   to_visit.push_back(from);
 
   // while next level not empty
   while (to_visit.empty() == false)
   {
-    lock_par_work(&par_work);
-    par_work.to_visit.swap(to_visit);
-    unlock_par_work(&par_work);
+    par_work.lock();
+    par_work.nodes.swap(to_visit);
+    par_work.unlock();
 
-    while ((node = par_work.pop_front()) != NULL)
+    node_t* node;
+    while ((node = par_work.pop()) != NULL)
     {
       if (node == to) { abort_thieves(ksc); goto on_done; }
       append_node_adjlist(node, to_visit);
@@ -401,7 +435,8 @@ static unsigned int find_shortest_path_par
   depth = 0;
 
  on_done:
-  kaapi_task_end_adaptive(sc);
+  kaapi_task_end_adaptive(ksc);
+
   return depth;
 }
 
@@ -419,6 +454,18 @@ static void peek_random_pair
 static void initialize_stuff(void)
 {
   srand(getpid() * time(0));
+
+#if CONFIG_PARALLEL
+  kaapi_init();
+#endif
+}
+
+
+static void finalize_stuff()
+{
+#if CONFIG_PARALLEL
+  kaapi_finalize();
+#endif
 }
 
 
@@ -459,6 +506,8 @@ int main(int ac, char** av)
 
     printf("\n");
   }
+
+  finalize_stuff();
 
   return 0;
 }

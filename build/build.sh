@@ -1,2 +1,3 @@
 #!/usr/bin/env sh
-g++ -Wall -O3 -march=native ../src/main.cc
+XKAAPIDIR=$HOME/install/xkaapi_release
+g++ -Wall -O3 -march=native -I$XKAAPIDIR/include ../src/main.cc -L$XKAAPIDIR/lib -lkaapi
