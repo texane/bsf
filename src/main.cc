@@ -291,7 +291,7 @@ static int reduce_thief
   if (tres->is_found == true)
     vres->is_found = true;
   else
-    vres->to_visit.splice(0, tres->to_visit);
+    vres->to_visit.splice(vres->to_visit.end(), tres->to_visit);
 
   return 0;
 }
