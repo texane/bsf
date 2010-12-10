@@ -268,15 +268,18 @@ typedef struct thief_result
 
 } thief_result_t;
 
+static int abort_thief
+(kaapi_stealcontext_t* sc, void* targ, void* tdata, size_t tsize, void* varg)
+{ return 0; }
 
 static void abort_thieves(kaapi_stealcontext_t* ksc)
 {
   kaapi_taskadaptive_result_t* ktr;
   while ((ktr = kaapi_get_thief_head(ksc)) != NULL)
-    kaapi_preempt_thief(ksc, ktr, NULL, NULL, NULL);
+    kaapi_preempt_thief(ksc, ktr, NULL, abort_thief, NULL);
 }
 
-static void reduce_thief
+static int reduce_thief
 (kaapi_stealcontext_t* sc, void* targ, void* tdata, size_t tsize, void* varg)
 {
   // victim result
@@ -286,12 +289,11 @@ static void reduce_thief
   thief_result_t* const tres = (thief_result_t*)tdata;
 
   if (tres->is_found == true)
-  {
     vres->is_found = true;
-    return ;
-  }
+  else
+    vres->to_visit.splice(0, tres->to_visit);
 
-  vres->to_visit.splice(0, tres->to_visit);
+  return 0;
 }
 
 static bool reduce_thieves
@@ -376,17 +378,16 @@ static int splitter
   int nrep = 0;
   for (; nreq; --nreq, ++nrep)
   {
-    if ((node = par_work->pop()) == NULL) break ;
+    node_t* const node = par_work->pop();
+    if (node == NULL) break ;
 
     kaapi_taskadaptive_result_t* const ktr =
       kaapi_allocate_thief_result(req, sizeof(thief_result_t), NULL);
     new (ktr->data) thief_result_t();
     
-    thief_work_t* const tw = kaapi_reply_init_adaptive_task
+    thief_work_t* const tw = (thief_work_t*)kaapi_reply_init_adaptive_task
       (ksc, req, (kaapi_task_body_t)thief_entrypoint, sizeof(thief_work_t), ktr);
-    new (tw) thief_work_t(node);
-    tw->from = node;
-    tw->to = par_work->to_find;
+    new (tw) thief_work_t(node, par_work->to_find);
 
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }
