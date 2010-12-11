@@ -17,12 +17,12 @@ using std::vector;
 
 
 #define CONFIG_SEQ_GRAIN 128
-#define CONFIG_NODE_COUNT 30000
-#define CONFIG_NODE_DEGREE 10
+#define CONFIG_NODE_COUNT 50000
+#define CONFIG_NODE_DEGREE 20
 #define CONFIG_MAX_THREAD 32
-#define CONFIG_PATH_DEPTH 10
-#define CONFIG_DEBUG 1
-#define CONFIG_ITER 10
+#define CONFIG_PATH_DEPTH 20
+#define CONFIG_DEBUG 0
+#define CONFIG_ITER 50
 
 
 typedef struct node
