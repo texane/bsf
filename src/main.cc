@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stddef.h>
+#include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #ifndef __USE_BSD
 # define __USE_BSD
@@ -17,11 +21,8 @@ using std::vector;
 
 
 #define CONFIG_SEQ_GRAIN 128
-#define CONFIG_NODE_COUNT 50000
-#define CONFIG_NODE_DEGREE 20
-#define CONFIG_MAX_THREAD 32
-#define CONFIG_PATH_DEPTH 20
-#define CONFIG_DEBUG 0
+#define CONFIG_PATH_DEPTH 30
+#define CONFIG_NODEID 1
 #define CONFIG_ITER 50
 
 
@@ -35,7 +36,7 @@ typedef struct node
   bool state;
 #endif
 
-#if CONFIG_DEBUG
+#if CONFIG_NODEID
   unsigned int id;
 #endif
 
@@ -95,7 +96,7 @@ typedef struct graph
     vector<node_t>::iterator pos = nodes.begin();
     vector<node_t>::iterator end = nodes.end();
 
-#if CONFIG_DEBUG
+#if CONFIG_NODEID
     unsigned int id = 0;
 #endif
 
@@ -103,7 +104,7 @@ typedef struct graph
     {
       pos->adjlist.clear();
       pos->state = false;
-#if CONFIG_DEBUG
+#if CONFIG_NODEID
       pos->id = id++;
 #endif
     }
@@ -124,7 +125,7 @@ typedef struct graph
     return &nodes[i];
   }
 
-#if CONFIG_DEBUG
+#if 0
   void print() const
   {
     vector<node_t>::const_iterator pos = nodes.begin();
@@ -147,7 +148,7 @@ typedef struct graph
 } graph_t;
 
 
-static void make_a_path
+static void __attribute__((unused)) make_a_path
 (graph_t& graph, node_t* a, node_t* b, unsigned int depth)
 {
   // depth the number of edges in between
@@ -172,12 +173,12 @@ static void make_a_path
 }
 
 
-static void generate_random_graph
-(graph_t& graph, unsigned int node_count)
+static void __attribute__((unused)) generate_random_graph
+(graph_t& graph, unsigned int node_count, unsigned int node_degree)
 {
   graph.initialize(node_count);
 
-  unsigned int edge_count = node_count * CONFIG_NODE_DEGREE / 2;
+  unsigned int edge_count = node_count * node_degree / 2;
   for (; edge_count; --edge_count)
   {
     node_t* const a = graph.at(rand() % node_count);
@@ -190,7 +191,155 @@ static void generate_random_graph
 }
 
 
-static void append_node_adjlist
+// graph loading
+
+typedef struct mapped_file
+{
+  unsigned char* base;
+  size_t off;
+  size_t len;
+} mapped_file_t;
+
+static int map_file(mapped_file_t* mf, const char* path)
+{
+  int error = -1;
+  struct stat st;
+
+  const int fd = open(path, O_RDONLY);
+  if (fd == -1)
+    return -1;
+
+  if (fstat(fd, &st) == -1)
+    goto on_error;
+
+  mf->base = (unsigned char*)mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+  if (mf->base == MAP_FAILED)
+    goto on_error;
+
+  mf->off = 0;
+  mf->len = st.st_size;
+
+  /* success */
+  error = 0;
+
+ on_error:
+  close(fd);
+
+  return error;
+}
+
+static void unmap_file(mapped_file_t* mf)
+{
+  munmap((void*)mf->base, mf->len);
+  mf->base = (unsigned char*)MAP_FAILED;
+  mf->len = 0;
+}
+
+static int next_line(mapped_file_t* mf, char* line)
+{
+  const unsigned char* end = mf->base + mf->len;
+  const unsigned char* const base = mf->base + mf->off;
+  const unsigned char* p;
+  size_t skipnl = 0;
+  size_t len = 0;
+  char* s;
+
+  for (p = base, s = line; p != end; ++p, ++s, ++len)
+  {
+    if (*p == '\n')
+    {
+      skipnl = 1;
+      break;
+    }
+
+    *s = (char)*p;
+  }
+
+  *s = 0;
+
+  if (p == base) return -1;
+
+  mf->off += (p - base) + skipnl;
+
+  return 0;
+}
+
+static bool next_edge
+(mapped_file_t& mf, unsigned int& from, unsigned int& to)
+{
+  char line[64];
+  if (next_line(&mf, line) == -1) return false;
+  sscanf(line, "%u %u", &from, &to);
+  return true;
+}
+
+static bool next_uint
+(mapped_file_t& mf, unsigned int& ui)
+{
+  char line[64];
+  if (next_line(&mf, line) == -1) return false;
+  sscanf(line, "%u", &ui);
+  return true;
+}
+
+static void load_graph(graph_t& graph, const char* path)
+{
+  unsigned int node_count, from, to;
+
+  mapped_file_t mapped = {NULL, 0, 0};
+
+  if (map_file(&mapped, path) == -1)
+  {
+    graph.initialize(0);
+    return ;
+  }
+
+  // node count
+  next_uint(mapped, node_count);
+  graph.initialize(node_count);
+
+  // edges
+  while (next_edge(mapped, from, to))
+    graph.at(from)->add_adj(graph.at(to));
+
+  unmap_file(&mapped);
+}
+
+
+static void __attribute__((unused)) store_graph
+(const graph_t& graph, const char* path)
+{
+  char line[256];
+  int len;
+
+  const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+  if (fd == -1) return ;
+
+  // node count
+  len = sprintf(line, "%u\n", graph.node_count());
+  write(fd, line, strlen(line));
+
+  // edges
+  vector<node_t>::const_iterator pos = graph.nodes.begin();
+  vector<node_t>::const_iterator end = graph.nodes.end();
+
+  for (; pos != end; ++pos)
+  {
+    list<node_t*>::const_iterator adjpos = (*pos).adjlist.begin();
+    list<node_t*>::const_iterator adjend = (*pos).adjlist.end();
+
+    for (; adjpos != adjend; ++adjpos)
+    {
+      len = sprintf(line, "%u %u\n", pos->id, (*adjpos)->id);
+      write(fd, line, len);
+    }
+  }
+
+  close(fd);
+}
+
+
+static void __attribute__((unused)) append_node_adjlist
 (node_t* node, list<node_t*>& to_visit)
 {
   list<node_t*>::const_iterator pos = node->adjlist.begin();
@@ -460,7 +609,7 @@ static unsigned int find_shortest_path_par
 #endif // CONFIG_PARALLEL
 
 
-static void peek_random_pair
+static void __attribute__((unused)) peek_random_pair
 (graph_t& g, node_t*& a, node_t*& b)
 {
   a = g.at(rand() % g.node_count());
@@ -495,29 +644,37 @@ int main(int ac, char** av)
 
   initialize_stuff();
 
-  generate_random_graph(g, CONFIG_NODE_COUNT);
-  peek_random_pair(g, from, to);
-  make_a_path(g, from, to, CONFIG_PATH_DEPTH);
+#if !(CONFIG_PARALLEL || CONFIG_SEQUENTIAL)
+  // generate and store a random graph
+  const unsigned int node_count = atoi(av[1]);
+  const unsigned int node_degree = atoi(av[2]);
+  generate_random_graph(g, node_count, node_degree);
+  store_graph(g, av[3]);
+  return 0;
+#endif
 
-  double total_usecs = 0.f;
+  load_graph(g, av[1]);
+  from = g.at(atoi(av[2]));
+  to = g.at(atoi(av[3]));
+
+  unsigned int depth;
+  double usecs = 0.f;
+
   for (unsigned int iter = 0; iter < CONFIG_ITER; ++iter)
   {
     g.unmark_nodes();
-
     gettimeofday(&tms[0], NULL);
-
 #if CONFIG_SEQUENTIAL
-    find_shortest_path_seq(g, from, to);
+    depth = find_shortest_path_seq(g, from, to);
 #elif CONFIG_PARALLEL
-    find_shortest_path_par(g, from, to);
+    depth = find_shortest_path_par(g, from, to);
 #endif
-
     gettimeofday(&tms[1], NULL);
     timersub(&tms[1], &tms[0], &tms[2]);
-    total_usecs += (double)tms[2].tv_sec * 1E6 + (double)tms[2].tv_usec;
+    usecs += (double)tms[2].tv_sec * 1E6 + (double)tms[2].tv_usec;
   }
 
-  printf("%lf\n", total_usecs / CONFIG_ITER);
+  printf("%u %lf\n", depth, usecs / CONFIG_ITER);
 
   finalize_stuff();
 
