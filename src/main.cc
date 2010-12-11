@@ -304,13 +304,8 @@ static bool reduce_thieves
   while ((ktr = kaapi_get_thief_head(ksc)) != NULL)
   {
     kaapi_preempt_thief(ksc, ktr, NULL, reduce_thief, (void*)&res);
-
-    if (res.is_found == true)
-    {
-      // found. preempt all thieves, runtime constraint.
-      abort_thieves(ksc);
-      return true;
-    }
+    // return true on found
+    if (res.is_found == true) return true;
   }
 
   return false;
@@ -349,6 +344,13 @@ typedef struct parallel_work
     return node;
   }
 
+  void set(list<node_t*>& to_visit)
+  {
+    lock();
+    nodes.swap(to_visit);
+    unlock();
+  }
+
 } parallel_work_t;
 
 // splitter
@@ -369,7 +371,11 @@ static void thief_entrypoint
   thief_work_t* const work = (thief_work_t*)args;
   thief_result_t* const res = (thief_result_t*)kaapi_adaptive_result_data(ksc);
 
-  if (work->from == work->to) { res->is_found = true; return ; }
+  if (work->from == work->to)
+  {
+    res->is_found = true;
+    return ;
+  }
 
   append_node_adjlist(work->from, res->to_visit);
 }
@@ -380,7 +386,7 @@ static int splitter
   parallel_work_t* const par_work = (parallel_work_t*)args;
 
   int nrep = 0;
-  for (; nreq; --nreq, ++nrep)
+  for (; nreq; --nreq, ++nrep, ++req)
   {
     node_t* const node = par_work->pop();
     if (node == NULL) break ;
@@ -420,18 +426,20 @@ static unsigned int find_shortest_path_par
   // while next level not empty
   while (to_visit.empty() == false)
   {
-    par_work.lock();
-    par_work.nodes.swap(to_visit);
-    par_work.unlock();
+    par_work.set(to_visit);
 
     node_t* node;
     while ((node = par_work.pop()) != NULL)
     {
-      if (node == to) { abort_thieves(ksc); goto on_done; }
+      // found, abort thieves
+      if (node == to) goto on_abort;
+
       append_node_adjlist(node, to_visit);
     }
 
-    if (reduce_thieves(ksc, to_visit) == true) goto on_done;
+    // found, abort remaining thieves
+    if (reduce_thieves(ksc, to_visit) == true)
+      goto on_abort;
 
     ++depth;
   }
@@ -441,8 +449,12 @@ static unsigned int find_shortest_path_par
 
  on_done:
   kaapi_task_end_adaptive(ksc);
-
   return depth;
+
+  // abort the remaining thieves
+ on_abort:
+  abort_thieves(ksc);
+  goto on_done;
 }
 
 #endif // CONFIG_PARALLEL
