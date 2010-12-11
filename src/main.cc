@@ -16,8 +16,6 @@ using std::list;
 using std::vector;
 
 
-#define CONFIG_SEQUENTIAL 1
-#define CONFIG_PARALLEL 1
 #define CONFIG_SEQ_GRAIN 128
 #define CONFIG_NODE_COUNT 30000
 #define CONFIG_NODE_DEGREE 10
@@ -330,7 +328,7 @@ typedef struct parallel_work
 
   void lock()
   {
-    while (__sync_bool_compare_and_swap(&lok, 0, 1))
+    while (!__sync_bool_compare_and_swap(&lok, 0, 1))
       __asm__ __volatile__ ("pause \n\t");
   }
 
@@ -338,10 +336,16 @@ typedef struct parallel_work
 
   node_t* pop()
   {
+    node_t* node = NULL;
+
     lock();
-    node_t* const node = nodes.front();
-    if (node != NULL) nodes.pop_front();
+    if (nodes.empty() == false)
+    {
+      node = nodes.front();
+      nodes.pop_front();
+    }
     unlock();
+
     return node;
   }
 
@@ -483,30 +487,25 @@ int main(int ac, char** av)
   peek_random_pair(g, from, to);
   make_a_path(g, from, to, CONFIG_PATH_DEPTH);
 
+  double total_usecs = 0.f;
   for (unsigned int iter = 0; iter < CONFIG_ITER; ++iter)
   {
     g.unmark_nodes();
 
+    gettimeofday(&tms[0], NULL);
+
 #if CONFIG_SEQUENTIAL
-    gettimeofday(&tms[0], NULL);
-    const unsigned int seq_depth = find_shortest_path_seq(g, from, to);
-    gettimeofday(&tms[1], NULL);
-    timersub(&tms[1], &tms[0], &tms[2]);
-    double seq_usecs = (double)tms[2].tv_sec * 1E6 + (double)tms[2].tv_usec;
-    printf("%u %lf ", seq_depth, seq_usecs);
+    find_shortest_path_seq(g, from, to);
+#elif CONFIG_PARALLEL
+    find_shortest_path_par(g, from, to);
 #endif
 
-#if CONFIG_PARALLEL
-    gettimeofday(&tms[0], NULL);
-    const unsigned int par_depth = find_shortest_path_par(g, from, to);
     gettimeofday(&tms[1], NULL);
     timersub(&tms[1], &tms[0], &tms[2]);
-    double par_usecs = (double)tms[2].tv_sec * 1E6 + (double)tms[2].tv_usec;
-    printf("%u %lf ", par_depth, par_usecs);
-#endif
-
-    printf("\n");
+    total_usecs += (double)tms[2].tv_sec * 1E6 + (double)tms[2].tv_usec;
   }
+
+  printf("%lf\n", total_usecs / CONFIG_ITER);
 
   finalize_stuff();
 
