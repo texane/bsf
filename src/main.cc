@@ -20,9 +20,7 @@ using std::list;
 using std::vector;
 
 
-#define CONFIG_SEQ_GRAIN 128
 #define CONFIG_PATH_DEPTH 30
-#define CONFIG_NODEID 1
 #define CONFIG_ITER 50
 
 
@@ -330,7 +328,9 @@ static void __attribute__((unused)) store_graph
 
     for (; adjpos != adjend; ++adjpos)
     {
+#if CONFIG_NODEID
       len = sprintf(line, "%u %u\n", pos->id, (*adjpos)->id);
+#endif
       write(fd, line, len);
     }
   }

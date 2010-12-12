@@ -2,11 +2,11 @@
 
 XKAAPIDIR=$HOME/install/xkaapi_release
 PROC=`getconf _NPROCESSORS_ONLN`
-COUNT=1000000 ;
-DEGREE=100 ;
+COUNT=500000 ;
+DEGREE=5 ;
 GRAPH=../dat/$COUNT\_$DEGREE.dat ;
 FROM=0
-TO=50000
+TO=1
 
 ../build/bfs_seq $GRAPH $FROM $TO ;
 
