@@ -1,0 +1,12 @@
+. performance issues using __sync_bool_compare_and_swap
+ . a node has a state that must be marked atomically
+ . trivially implemented in sequential version
+ . CAS instruction used in concurrent version
+ . on a 10000 nodes graph with an average degree of 250
+  . 86453.200000 versus 186766.280000 usecs
+ . same problem with __sync_fetch_and_or
+ . tested on idkoiff
+ . solution: avoid the use of CAS by reading the value first
+  . same experience
+  . 85131.820000 versus 83865.340000 usecs
+
