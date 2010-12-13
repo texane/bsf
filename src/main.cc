@@ -20,7 +20,6 @@ using std::list;
 using std::vector;
 
 
-#define CONFIG_PATH_DEPTH 30
 #define CONFIG_ITER 50
 
 
@@ -475,7 +474,7 @@ typedef struct parallel_work
 
   void lock()
   {
-    while (!__sync_bool_compare_and_swap(&lok, 0, 1))
+    while (!((lok == 0) && __sync_bool_compare_and_swap(&lok, 0, 1)))
       __asm__ __volatile__ ("pause \n\t");
   }
 

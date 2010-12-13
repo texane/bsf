@@ -4,11 +4,11 @@ XKAAPIDIR=$HOME/install/xkaapi_release
 TCMALLOCDIR=$HOME/install
 
 PROC=`getconf _NPROCESSORS_ONLN`
-COUNT=10000 ;
-DEGREE=250 ;
+COUNT=100000 ;
+DEGREE=20 ;
 GRAPH=../dat/$COUNT\_$DEGREE.dat ;
 FROM=0
-TO=1000000
+TO=100000
 
 taskset -c 0 ../build/bfs_seq $GRAPH $FROM $TO ;
 
