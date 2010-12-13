@@ -10,3 +10,11 @@
   . same experience
   . 85131.820000 versus 83865.340000 usecs
 
+. sequential time versus parallel with 1 thread:
+ . 90177.720000 vs 103109.480000 usecs
+ . cost does NOT come from fetch_and_or
+
+
+. il semble qu une primitive de type abort point soit necessaire
+ . sinon on ne peut pas aborter sans preempter
+ . todo: implementer a la main: if (thief_res->aborted) return ;

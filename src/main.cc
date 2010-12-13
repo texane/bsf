@@ -208,7 +208,8 @@ static int map_file(mapped_file_t* mf, const char* path)
   if (fstat(fd, &st) == -1)
     goto on_error;
 
-  mf->base = (unsigned char*)mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+  mf->base = (unsigned char*)mmap
+    (NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
   if (mf->base == MAP_FAILED)
     goto on_error;
 
@@ -527,6 +528,13 @@ typedef struct parallel_work
     unlock();
   }
 
+  void unset(list<node_t*>& to_delete)
+  {
+    lock();
+    to_delete.swap(nodes);
+    unlock();
+  }
+
 } parallel_work_t;
 
 // splitter
@@ -611,6 +619,7 @@ static unsigned int find_shortest_path_par
     (thread, KAAPI_SC_CONCURRENT | KAAPI_SC_PREEMPTION, splitter, &par_work);
   par_work.to_find = to;
 
+  list<node_t*> to_delete;
   list<node_t*> to_visit;
   unsigned int depth = 0;
 
@@ -624,13 +633,25 @@ static unsigned int find_shortest_path_par
     node_t* node;
     while ((node = par_work.pop()) != NULL)
     {
-      // found, abort thieves
-      if (node == to) goto on_abort;
+      // if found, abort thieves
+      if (node == to)
+      {
+	// ensure no more parallel work, otherwise
+	// a thief could be missed during abortion
+	kaapi_steal_setsplitter(ksc, 0, 0);
+	par_work.unset(to_delete);
+	goto on_abort;
+      }
 
       append_node_adjlist(node, to_visit);
     }
 
-    // found, abort remaining thieves
+    // from here there wont be any parallel
+    // work added until to_visit is swapped.
+    // this is important since xkaapi has the
+    // following constraint: we cannot preempt
+    // if there is some parallel work because
+    // we may miss a thief
     if (reduce_thieves(ksc, to_visit) == true)
       goto on_abort;
 
