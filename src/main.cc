@@ -411,10 +411,13 @@ typedef struct thief_result
   bool is_reduced;
 #endif
 
+  volatile bool is_aborted;
+
   bool is_found;
   list<node_t*> to_visit;
 
-  thief_result() : is_found(false) {}
+  thief_result() :
+    is_aborted(false), is_found(false) {}
 #if 0 // unused
     : is_reduced(false), is_found(false) {}
 #endif
@@ -429,7 +432,10 @@ static void abort_thieves(kaapi_stealcontext_t* ksc)
 {
   kaapi_taskadaptive_result_t* ktr;
   while ((ktr = kaapi_get_thief_head(ksc)) != NULL)
+  {
+    ((thief_result_t*)ktr->data)->is_aborted = true;
     kaapi_preempt_thief(ksc, ktr, NULL, abort_thief, NULL);
+  }
 }
 
 static int common_reducer
@@ -551,6 +557,22 @@ typedef struct thief_work
 
 } thief_work_t;
 
+
+static bool __attribute__((unused)) append_node_adjlist_or_abort
+(node_t* node, list<node_t*>& to_visit, volatile bool& is_aborted)
+{
+  list<node_t*>::const_iterator pos = node->adjlist.begin();
+  list<node_t*>::const_iterator end = node->adjlist.end();
+
+  for (; pos != end; ++pos)
+  {
+    if ((*pos)->mark_ifnot() == true)
+      to_visit.push_back(*pos);
+  }
+
+  return false;
+}
+
 static void thief_entrypoint
 (void* args, kaapi_thread_t* thread, kaapi_stealcontext_t* ksc)
 {
@@ -568,7 +590,13 @@ static void thief_entrypoint
       return ;
     }
 
+#if 0
+    const bool is_aborted = append_node_adjlist_or_abort
+      (*pos, res->to_visit, res->is_aborted);
+    if (is_aborted == true) return true;
+#else
     append_node_adjlist(*pos, res->to_visit);
+#endif
   }
 }
 
