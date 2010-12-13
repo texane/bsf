@@ -25,13 +25,13 @@ using std::vector;
 
 typedef struct node
 {
-  list<struct node*> adjlist;
-
 #if CONFIG_PARALLEL
   volatile bool state __attribute__((aligned));
 #else
   bool state;
 #endif
+
+  list<struct node*> adjlist;
 
 #if CONFIG_NODEID
   unsigned int id;
@@ -59,17 +59,13 @@ typedef struct node
   bool mark_ifnot()
   {
     if (state == true) return false;
-    return __sync_bool_compare_and_swap(&state, 0, 1);
+    return !__sync_fetch_and_or(&state, 1);
   }
 #else
   bool mark_ifnot()
   { 
-    if (state == false)
-    {
-      state = true;
-      return true;
-    }
-    return false;
+    if (state == true) return false;
+    state = true; return true;
   }
 #endif
 
@@ -410,10 +406,17 @@ typedef struct victim_result
 
 typedef struct thief_result
 {
+#if 0 // unused
+  bool is_reduced;
+#endif
+
   bool is_found;
   list<node_t*> to_visit;
 
   thief_result() : is_found(false) {}
+#if 0 // unused
+    : is_reduced(false), is_found(false) {}
+#endif
 
 } thief_result_t;
 
@@ -428,15 +431,9 @@ static void abort_thieves(kaapi_stealcontext_t* ksc)
     kaapi_preempt_thief(ksc, ktr, NULL, abort_thief, NULL);
 }
 
-static int reduce_thief
-(kaapi_stealcontext_t* sc, void* targ, void* tdata, size_t tsize, void* varg)
+static int common_reducer
+(victim_result_t* vres, thief_result_t* tres)
 {
-  // victim result
-  victim_result_t* const vres = (victim_result_t*)varg;
-  
-  // thief result
-  thief_result_t* const tres = (thief_result_t*)tdata;
-
   if (tres->is_found == true)
     vres->is_found = true;
   else
@@ -444,6 +441,34 @@ static int reduce_thief
 
   return 0;
 }
+
+#if 0 // unused
+
+static int thief_reducer
+(kaapi_taskadaptive_result_t* ktr, void* varg, void* targ)
+{
+  common_reducer((victim_result_t*)varg, (thief_result_t*)ktr->data);
+  ((thief_result_t*)ktr->data)->is_reduced = true;
+  return 0;
+}
+static int victim_reducer
+(kaapi_stealcontext_t* sc, void* targ, void* tdata, size_t tsize, void* varg)
+{
+  if (((thief_result_t*)tdata)->is_reduced == 0)
+    common_reducer((victim_result_t*)varg, (thief_result_t*)tdata);
+  return 0;
+}
+
+#else
+
+static int victim_reducer
+(kaapi_stealcontext_t* sc, void* targ, void* tdata, size_t tsize, void* varg)
+{
+  common_reducer((victim_result_t*)varg, (thief_result_t*)tdata);
+  return 0;
+}
+
+#endif
 
 static bool reduce_thieves
 (kaapi_stealcontext_t* ksc, list<node_t*>& to_visit)
@@ -454,7 +479,7 @@ static bool reduce_thieves
   
   while ((ktr = kaapi_get_thief_head(ksc)) != NULL)
   {
-    kaapi_preempt_thief(ksc, ktr, NULL, reduce_thief, (void*)&res);
+    kaapi_preempt_thief(ksc, ktr, NULL, victim_reducer, (void*)&res);
     // return true on found
     if (res.is_found == true) return true;
   }
@@ -508,11 +533,13 @@ typedef struct parallel_work
 
 typedef struct thief_work
 {
-  node_t* from;
-  node_t* to;
+#define CONFIG_PAR_GRAIN 32
+  node_t* nodes[CONFIG_PAR_GRAIN];
+  unsigned int node_count;
+  node_t* to_find;
 
-  thief_work(node_t* _from, node_t* _to)
-    : from(_from), to(_to) {}
+  thief_work(node_t* _to_find)
+    : node_count(0), to_find(_to_find) {}
 
 } thief_work_t;
 
@@ -522,13 +549,19 @@ static void thief_entrypoint
   thief_work_t* const work = (thief_work_t*)args;
   thief_result_t* const res = (thief_result_t*)kaapi_adaptive_result_data(ksc);
 
-  if (work->from == work->to)
-  {
-    res->is_found = true;
-    return ;
-  }
+  node_t** pos = work->nodes;
+  unsigned int count = work->node_count;
 
-  append_node_adjlist(work->from, res->to_visit);
+  for (; count; --count, ++pos)
+  {
+    if (*pos == work->to_find)
+    {
+      res->is_found = true;
+      return ;
+    }
+
+    append_node_adjlist(*pos, res->to_visit);
+  }
 }
 
 static int splitter
@@ -539,7 +572,8 @@ static int splitter
   int nrep = 0;
   for (; nreq; --nreq, ++nrep, ++req)
   {
-    node_t* const node = par_work->pop();
+    // push at least one before allocating task
+    node_t* node = par_work->pop();
     if (node == NULL) break ;
 
     kaapi_taskadaptive_result_t* const ktr =
@@ -548,7 +582,15 @@ static int splitter
     
     thief_work_t* const tw = (thief_work_t*)kaapi_reply_init_adaptive_task
       (ksc, req, (kaapi_task_body_t)thief_entrypoint, sizeof(thief_work_t), ktr);
-    new (tw) thief_work_t(node, par_work->to_find);
+    new (tw) thief_work_t(par_work->to_find);
+
+    tw->nodes[0] = node;
+    tw->node_count = 1;
+    while (tw->node_count < CONFIG_PAR_GRAIN)
+    {
+      if ((node = par_work->pop()) == NULL) break ;
+      tw->nodes[tw->node_count++] = node;
+    }
 
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }

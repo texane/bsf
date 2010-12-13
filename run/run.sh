@@ -1,14 +1,13 @@
 #!/usr/bin/env sh
 
 XKAAPIDIR=$HOME/install/xkaapi_release
-TCMALLOCDIR=$HOME/install
 
 PROC=`getconf _NPROCESSORS_ONLN`
 COUNT=100000 ;
-DEGREE=20 ;
+DEGREE=40 ;
 GRAPH=../dat/$COUNT\_$DEGREE.dat ;
 FROM=0
-TO=100000
+TO=50000
 
 taskset -c 0 ../build/bfs_seq $GRAPH $FROM $TO ;
 
