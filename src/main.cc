@@ -431,11 +431,17 @@ static int abort_thief
 static void abort_thieves(kaapi_stealcontext_t* ksc)
 {
   kaapi_taskadaptive_result_t* ktr;
-  while ((ktr = kaapi_get_thief_head(ksc)) != NULL)
-  {
+
+  // 2 passes abortion. note the list is safe
+  // since there is no parallel work, meaning
+  // no thief can be added during iteration
+
+  ktr = kaapi_get_thief_head(ksc);
+  for (; ktr != 0; ktr = kaapi_get_next_thief(ktr))
     ((thief_result_t*)ktr->data)->is_aborted = true;
+
+  while ((ktr = kaapi_get_thief_head(ksc)) != NULL)
     kaapi_preempt_thief(ksc, ktr, NULL, abort_thief, NULL);
-  }
 }
 
 static int common_reducer
@@ -584,6 +590,9 @@ static void thief_entrypoint
 
   for (; count; --count, ++pos)
   {
+    if (res->is_aborted == true)
+      return ;
+
     if (*pos == work->to_find)
     {
       res->is_found = true;
