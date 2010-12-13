@@ -58,7 +58,10 @@ typedef struct node
 
 #if CONFIG_PARALLEL
   bool mark_ifnot()
-  { return __sync_bool_compare_and_swap(&state, 0, 1); }
+  {
+    if (state == true) return false;
+    return __sync_bool_compare_and_swap(&state, 0, 1);
+  }
 #else
   bool mark_ifnot()
   { 
