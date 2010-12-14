@@ -553,7 +553,8 @@ typedef struct parallel_work
       __asm__ __volatile__ ("pause \n\t");
   }
 
-  void unlock() { lok = 0; }
+  void unlock()
+  { __sync_fetch_and_and(&lok, 0); }
 
   node_t* pop()
   {
@@ -570,17 +571,15 @@ typedef struct parallel_work
     return node;
   }
 
-  size_t pop(node_t* _nodes[], size_t pop_size)
+  size_t pop_safe
+  (node_t* _nodes[], size_t pop_size, nodeptr_list& todel)
   {
-    nodeptr_list todel;
     size_t count = 0;
-
-    lock();
 
     nodeptr_list::iterator pos = nodes.begin();
     nodeptr_list::iterator end = nodes.end();
 
-    if (pos == end) goto on_done;
+    if (pos == end) return 0;
 
     while ((pos != end) && (count < pop_size))
     {
@@ -591,10 +590,16 @@ typedef struct parallel_work
     // delete outside the lock
     todel.splice(todel.end(), nodes, nodes.begin(), pos);
 
-  on_done:
-    unlock();
-
     return count;
+  }
+
+  size_t pop
+  (node_t* _nodes[], size_t pop_size, nodeptr_list& todel)
+  {
+    lock();
+    const size_t size = pop_safe(_nodes, pop_size, todel);
+    unlock();
+    return size;
   }
 
   void set(nodeptr_list& to_visit)
@@ -677,13 +682,14 @@ static int splitter
 (kaapi_stealcontext_t* ksc, int nreq, kaapi_request_t* req, void* args)
 {
   parallel_work_t* const par_work = (parallel_work_t*)args;
+  nodeptr_list to_del;
+
+  par_work->lock();
 
   int nrep = 0;
   for (; nreq; --nreq, ++nrep, ++req)
   {
-    // push at least one before allocating task
-    node_t* node = par_work->pop();
-    if (node == NULL) break ;
+    if (par_work->nodes.empty()) break;
 
     kaapi_taskadaptive_result_t* const ktr =
       kaapi_allocate_thief_result(req, sizeof(thief_result_t), NULL);
@@ -693,11 +699,12 @@ static int splitter
       (ksc, req, (kaapi_task_body_t)thief_entrypoint, sizeof(thief_work_t), ktr);
     new (tw) thief_work_t(par_work->to_find);
 
-    tw->nodes[0] = node;
-    tw->node_count += 1 + par_work->pop(tw->nodes + 1, CONFIG_PAR_GRAIN - 1);
+    tw->node_count = par_work->pop_safe(tw->nodes, CONFIG_PAR_GRAIN, to_del);
 
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }
+
+  par_work->unlock();
 
   return nrep;
 }
@@ -730,7 +737,7 @@ static unsigned int find_shortest_path_par
     par_work.set(to_visit);
 
     // extract_seq
-    while ((node_count = par_work.pop(nodes, CONFIG_PAR_GRAIN)))
+    while ((node_count = par_work.pop(nodes, CONFIG_PAR_GRAIN, to_delete)))
     {
       // seq_loop
       for (size_t i = 0; i < node_count; ++i)
