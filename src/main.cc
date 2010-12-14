@@ -602,7 +602,7 @@ static void thief_entrypoint
 #if 0
     const bool is_aborted = append_node_adjlist_or_abort
       (*pos, res->to_visit, res->is_aborted);
-    if (is_aborted == true) return true;
+    if (is_aborted == true) return ;
 #else
     append_node_adjlist(*pos, res->to_visit);
 #endif
