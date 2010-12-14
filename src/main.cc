@@ -572,18 +572,29 @@ typedef struct parallel_work
 
   size_t pop(node_t* _nodes[], size_t pop_size)
   {
+    nodeptr_list todel;
+    size_t count = 0;
+
     lock();
 
-    size_t pos = 0;
-    while ((nodes.empty() == false) && (pos < pop_size))
+    nodeptr_list::iterator pos = nodes.begin();
+    nodeptr_list::iterator end = nodes.end();
+
+    if (pos == end) goto on_done;
+
+    while ((pos != end) && (count < pop_size))
     {
-      _nodes[pos++] = nodes.front();
-      nodes.pop_front();
+      _nodes[count] = *pos;
+      ++count; ++pos;
     }
 
+    // delete outside the lock
+    todel.splice(todel.end(), nodes, nodes.begin(), pos);
+
+  on_done:
     unlock();
 
-    return pos;
+    return count;
   }
 
   void set(nodeptr_list& to_visit)
