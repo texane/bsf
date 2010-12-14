@@ -56,3 +56,7 @@ sur le thief dans l entrypoint au besoin
  . [x] il semble qu une primitive de type abort point soit necessaire
   . sinon on ne peut pas aborter sans preempter
   . todo: implementer a la main: if (thief_res->aborted) return ;
+
+. graph sets
+ . http://aws.amazon.com/datasets/2379?_encoding=UTF8&jiveRedirect=1
+ . http://www.cise.ufl.edu/research/sparse/matrices/list_by_name.html

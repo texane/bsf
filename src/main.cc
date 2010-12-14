@@ -23,6 +23,43 @@ using std::vector;
 #define CONFIG_ITER 50
 
 
+template<typename T>
+struct list_with_size : public list<T>
+{
+  typedef typename list<T>::iterator iterator;
+  typedef typename list<T>::const_iterator const_iterator;
+
+  size_t _size;
+
+  list_with_size() :
+    list<T>(), _size(0) {}
+
+  void push_back(T& elem)
+  {
+    ++_size;
+    ((list<T>*)this)->push_back(elem);
+  }
+
+  void push_front(T& elem)
+  {
+    ++_size;
+    ((list<T>*)this)->push_front(elem);
+  }
+
+  void pop_front()
+  {
+    --_size;
+    ((list<T>*)this)->pop_front();
+  }
+
+  size_t size() const
+  { return _size; }
+};
+
+// we want list::size() in constant time
+struct node;
+typedef list_with_size<struct node*> nodeptr_list;
+
 typedef struct node
 {
 #if CONFIG_PARALLEL
@@ -31,7 +68,7 @@ typedef struct node
   bool state;
 #endif
 
-  list<struct node*> adjlist;
+  nodeptr_list adjlist;
 
 #if CONFIG_NODEID
   unsigned int id;
@@ -39,8 +76,8 @@ typedef struct node
 
   bool has_adj(const struct node* adj) const
   {
-    list<struct node*>::const_iterator pos = adjlist.begin();
-    list<struct node*>::const_iterator end = adjlist.end();
+    nodeptr_list::const_iterator pos = adjlist.begin();
+    nodeptr_list::const_iterator end = adjlist.end();
 
     for (; pos != end; ++pos)
       if (*pos == adj)
@@ -130,8 +167,8 @@ typedef struct graph
     {
       printf("%u:", (*pos).id);
 
-      list<node_t*>::const_iterator adjpos = (*pos).adjlist.begin();
-      list<node_t*>::const_iterator adjend = (*pos).adjlist.end();
+      nodeptr_list::const_iterator adjpos = (*pos).adjlist.begin();
+      nodeptr_list::const_iterator adjend = (*pos).adjlist.end();
 
       for (; adjpos != adjend; ++adjpos)
 	printf(" %u", (*adjpos)->id);
@@ -322,8 +359,8 @@ static void __attribute__((unused)) store_graph
 
   for (; pos != end; ++pos)
   {
-    list<node_t*>::const_iterator adjpos = (*pos).adjlist.begin();
-    list<node_t*>::const_iterator adjend = (*pos).adjlist.end();
+    nodeptr_list::const_iterator adjpos = (*pos).adjlist.begin();
+    nodeptr_list::const_iterator adjend = (*pos).adjlist.end();
 
     for (; adjpos != adjend; ++adjpos)
     {
@@ -339,10 +376,10 @@ static void __attribute__((unused)) store_graph
 
 
 static void __attribute__((unused)) append_node_adjlist
-(node_t* node, list<node_t*>& to_visit)
+(node_t* node, nodeptr_list& to_visit)
 {
-  list<node_t*>::const_iterator pos = node->adjlist.begin();
-  list<node_t*>::const_iterator end = node->adjlist.end();
+  nodeptr_list::iterator pos = node->adjlist.begin();
+  nodeptr_list::iterator end = node->adjlist.end();
 
   for (; pos != end; ++pos)
   {
@@ -358,7 +395,7 @@ static unsigned int find_shortest_path_seq
 (graph_t& g, node_t* from, node_t* to)
 {
   // current and levels
-  list<node_t*> to_visit[2];
+  nodeptr_list to_visit[2];
   unsigned int depth = 0;
 
   // bootstrap algorithm
@@ -398,9 +435,9 @@ static unsigned int find_shortest_path_seq
 typedef struct victim_result
 {
   bool is_found;
-  list<node_t*>& to_visit;
+  nodeptr_list& to_visit;
 
-  victim_result(list<node_t*>& _to_visit)
+  victim_result(nodeptr_list& _to_visit)
     : is_found(false), to_visit(_to_visit) {}
 
 } victim_result_t;
@@ -414,7 +451,7 @@ typedef struct thief_result
   volatile bool is_aborted;
 
   bool is_found;
-  list<node_t*> to_visit;
+  nodeptr_list to_visit;
 
   thief_result() :
     is_aborted(false), is_found(false) {}
@@ -484,7 +521,7 @@ static int victim_reducer
 #endif
 
 static bool reduce_thieves
-(kaapi_stealcontext_t* ksc, list<node_t*>& to_visit)
+(kaapi_stealcontext_t* ksc, nodeptr_list& to_visit)
 {
   kaapi_taskadaptive_result_t* ktr;
 
@@ -505,7 +542,7 @@ static bool reduce_thieves
 typedef struct parallel_work
 {
   volatile unsigned long lok __attribute__((aligned(64)));
-  list<node_t*> nodes;
+  nodeptr_list nodes;
   node_t* to_find;
 
   parallel_work() : lok(0) {}
@@ -533,14 +570,30 @@ typedef struct parallel_work
     return node;
   }
 
-  void set(list<node_t*>& to_visit)
+  size_t pop(node_t* _nodes[], size_t pop_size)
+  {
+    lock();
+
+    size_t pos = 0;
+    while ((nodes.empty() == false) && (pos < pop_size))
+    {
+      _nodes[pos++] = nodes.front();
+      nodes.pop_front();
+    }
+
+    unlock();
+
+    return pos;
+  }
+
+  void set(nodeptr_list& to_visit)
   {
     lock();
     nodes.swap(to_visit);
     unlock();
   }
 
-  void unset(list<node_t*>& to_delete)
+  void unset(nodeptr_list& to_delete)
   {
     lock();
     to_delete.swap(nodes);
@@ -565,10 +618,10 @@ typedef struct thief_work
 
 
 static bool __attribute__((unused)) append_node_adjlist_or_abort
-(node_t* node, list<node_t*>& to_visit, volatile bool& is_aborted)
+(node_t* node, nodeptr_list& to_visit, volatile bool& is_aborted)
 {
-  list<node_t*>::const_iterator pos = node->adjlist.begin();
-  list<node_t*>::const_iterator end = node->adjlist.end();
+  nodeptr_list::iterator pos = node->adjlist.begin();
+  nodeptr_list::iterator end = node->adjlist.end();
 
   for (; pos != end; ++pos)
   {
@@ -630,12 +683,7 @@ static int splitter
     new (tw) thief_work_t(par_work->to_find);
 
     tw->nodes[0] = node;
-    tw->node_count = 1;
-    while (tw->node_count < CONFIG_PAR_GRAIN)
-    {
-      if ((node = par_work->pop()) == NULL) break ;
-      tw->nodes[tw->node_count++] = node;
-    }
+    tw->node_count += 1 + par_work->pop(tw->nodes + 1, CONFIG_PAR_GRAIN - 1);
 
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }
@@ -656,9 +704,12 @@ static unsigned int find_shortest_path_par
     (thread, KAAPI_SC_CONCURRENT | KAAPI_SC_PREEMPTION, splitter, &par_work);
   par_work.to_find = to;
 
-  list<node_t*> to_delete;
-  list<node_t*> to_visit;
+  nodeptr_list to_delete;
+  nodeptr_list to_visit;
   unsigned int depth = 0;
+
+  node_t* nodes[CONFIG_PAR_GRAIN];
+  size_t node_count;
 
   to_visit.push_back(from);
 
@@ -667,21 +718,28 @@ static unsigned int find_shortest_path_par
   {
     par_work.set(to_visit);
 
-    node_t* node;
-    while ((node = par_work.pop()) != NULL)
+    // extract_seq
+    while ((node_count = par_work.pop(nodes, CONFIG_PAR_GRAIN)))
     {
-      // if found, abort thieves
-      if (node == to)
+      // seq_loop
+      for (size_t i = 0; i < node_count; ++i)
       {
-	// ensure no more parallel work, otherwise
-	// a thief could be missed during abortion
-	kaapi_steal_setsplitter(ksc, 0, 0);
-	par_work.unset(to_delete);
-	goto on_abort;
-      }
+	node_t* const node = nodes[i];
 
-      append_node_adjlist(node, to_visit);
-    }
+	// if found, abort thieves
+	if (node == to)
+	{
+	  // ensure no more parallel work, otherwise
+	  // a thief could be missed during abortion
+	  kaapi_steal_setsplitter(ksc, 0, 0);
+	  par_work.unset(to_delete);
+	  goto on_abort;
+	}
+
+	append_node_adjlist(node, to_visit);
+      } // endof_seq_loop
+
+    } // endof_extract_seq
 
     // from here there wont be any parallel
     // work added until to_visit is swapped.
