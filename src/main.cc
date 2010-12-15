@@ -553,6 +553,8 @@ static int splitter
     new (ktr->data) thief_result_t
       (vw->adj_nodes, vw->adj_sums, vw->sums[j - unit_size]);
 
+    printf("split: [%lu, %lu[ -> %lu\n", j - unit_size, j, vw->sums[j - unit_size]);
+
     // thief work
     par_work_t* const tw = (par_work_t*)kaapi_reply_init_adaptive_task
       (ksc, req, (kaapi_task_body_t)thief_entry, sizeof(par_work_t), ktr);
@@ -590,13 +592,15 @@ static int common_reducer
     return 0;
   }
 
+  printf("reduction: [0, %lu[ [%lu, %lu[\n", vres->j, tres->i, tres->j);
+
   // compact thief result nodes
   // [0, vres->j[, [vres->j, tres->i[, [tres->i, tres->j[
   const size_t thief_size = tres->j - tres->i;
   if (thief_size && (vres->j != tres->i))
   {
     memcpy(vres->adj_nodes + vres->j, vres->adj_nodes + tres->i, thief_size);
-    memcpy(vres->adj_sums + vres->j, vres->adj_nodes + tres->i, thief_size);
+    memcpy(vres->adj_sums + vres->j, vres->adj_sums + tres->i, thief_size);
   }
 
   // adjust index
@@ -666,8 +670,8 @@ static void process_node
 
     // push adjacent node and integrate adjlist size
     res.adj_nodes[res.j] = *pos;
-    res.adj_sum += (*pos)->adjlist.size();
     res.adj_sums[res.j] = res.adj_sum;
+    res.adj_sum += (*pos)->adjlist.size();
     ++res.j;
   }
 }
@@ -722,8 +726,9 @@ static unsigned int find_shortest_path_par
   res.adj_nodes = (node_t**)malloc(sizeof(node_t*));
   res.adj_nodes[0] = from;
 
+  res.adj_sum = from->adjlist.size();
   res.adj_sums = (size_t*)malloc(sizeof(size_t));
-  res.adj_sums[0] = from->adjlist.size();
+  res.adj_sums[0] = 0;
 
   res.j = 1;
 
@@ -742,9 +747,11 @@ static unsigned int find_shortest_path_par
     pw.nodes = res.adj_nodes;
     pw.sums = res.adj_sums;
 
+    printf("-- layer %u: %lu nodes, %lu max adjacent\n", depth, res.j, res.adj_sum);
+
     // allocate next layer adjacent nodes, sums
-    pw.adj_nodes = (node_t**)malloc(res.adj_sums[res.j - 1] * sizeof(node_t*));
-    pw.adj_sums = (size_t*)malloc(res.adj_sums[res.j - 1] * sizeof(size_t));
+    pw.adj_nodes = (node_t**)malloc(res.adj_sum * sizeof(node_t*));
+    pw.adj_sums = (size_t*)malloc(res.adj_sum * sizeof(size_t));
 
     // commit the parallel work
     kaapi_workqueue_set(&pw.range, 0, (kaapi_workqueue_index_t)res.j);
