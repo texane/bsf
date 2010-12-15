@@ -450,7 +450,8 @@ static unsigned int find_shortest_path_seq
 
 typedef struct par_work
 {
-  kaapi_workqueue_t range;
+  kaapi_workqueue_t* range;
+
   node_t** volatile nodes;
   size_t* volatile sums;
 
@@ -459,20 +460,20 @@ typedef struct par_work
 
   node_t* to_find;
 
-  par_work(node_t* _to_find)
-    : nodes(NULL), sums(NULL), to_find(_to_find)
-  {
-    kaapi_workqueue_init(&range, 0, 0);
-  }
+  par_work(kaapi_workqueue_t* _range, node_t* _to_find)
+    : range(_range), nodes(NULL), sums(NULL), to_find(_to_find)
+  {}
 
   par_work
   (
+   kaapi_workqueue_t* _range,
    node_t* _to_find,
    node_t** _nodes, size_t* _sums,
-   node_t** _adj_nodes, size_t* _adj_sums,
-   kaapi_workqueue_index_t i, kaapi_workqueue_index_t j
+   node_t** _adj_nodes, size_t* _adj_sums
   )
   {
+    range = _range;
+
     to_find = _to_find;
 
     nodes = _nodes;
@@ -480,8 +481,6 @@ typedef struct par_work
 
     adj_nodes = _adj_nodes;
     adj_sums = _adj_sums;
-
-    kaapi_workqueue_init(&range, i, j);
   }
 
 } par_work_t;
@@ -491,17 +490,41 @@ typedef struct par_work
 
 typedef struct thief_result
 {
+  kaapi_workqueue_t range;
+
   node_t** adj_nodes;
   size_t* adj_sums;
   size_t adj_sum;
   size_t i, j;
   bool is_found;
 
-  thief_result(node_t** _adj_nodes, size_t* _adj_sums, size_t _i)
-    : adj_nodes(_adj_nodes), adj_sums(_adj_sums),
-      adj_sum(0), i(_i), j(_i), is_found(false) {}
+  thief_result
+  (
+   kaapi_workqueue_index_t beg,
+   kaapi_workqueue_index_t end,
+   node_t** _adj_nodes,
+   size_t* _adj_sums,
+   size_t _i
+  )
+  {
+    kaapi_workqueue_init(&range, beg, end);
 
-  thief_result() : is_found(false) {}
+    adj_nodes = _adj_nodes;
+    adj_sums = _adj_sums;
+    adj_sum = 0;
+
+    i = _i;
+    j = _i;
+
+    is_found = false;
+  }
+
+  thief_result()
+  {
+    kaapi_workqueue_init(&range, 0, 0);
+    is_found = false;
+  }
+
 } thief_result_t;
 
 typedef thief_result_t victim_result_t;
@@ -528,7 +551,7 @@ static int splitter
 
  redo_steal:
   // do not steal if range size <= PAR_GRAIN
-  range_size = kaapi_workqueue_size(&vw->range);
+  range_size = kaapi_workqueue_size(vw->range);
   if (range_size <= CONFIG_PAR_GRAIN)
     return 0;
 
@@ -542,7 +565,7 @@ static int splitter
 
   // perform the actual steal. if the range
   // changed size in between, redo the steal
-  if (kaapi_workqueue_steal(&vw->range, &i, &j, nreq * unit_size))
+  if (kaapi_workqueue_steal(vw->range, &i, &j, nreq * unit_size))
     goto redo_steal;
 
   for (; nreq; --nreq, ++req, ++nrep, j -= unit_size)
@@ -550,16 +573,17 @@ static int splitter
     // thief result
     kaapi_taskadaptive_result_t* const ktr =
       kaapi_allocate_thief_result(req, sizeof(thief_result_t), NULL);
-    new (ktr->data) thief_result_t
-      (vw->adj_nodes, vw->adj_sums, vw->sums[j - unit_size]);
+    thief_result_t* const tres = (thief_result_t*)ktr->data;
+    new (tres) thief_result_t
+      (j - unit_size, j, vw->adj_nodes, vw->adj_sums, vw->sums[j - unit_size]);
 
-    printf("split: [%lu, %lu[ -> %lu\n", j - unit_size, j, vw->sums[j - unit_size]);
+    printf("split: [%lu, %lu[ -> [%lu, %lu[\n", j - unit_size, j, vw->sums[j - unit_size], vw->sums[j - 1]);
 
     // thief work
     par_work_t* const tw = (par_work_t*)kaapi_reply_init_adaptive_task
       (ksc, req, (kaapi_task_body_t)thief_entry, sizeof(par_work_t), ktr);
     new (tw) par_work_t
-      (vw->to_find, vw->nodes, vw->sums, vw->adj_nodes, vw->adj_sums, j - unit_size, j);
+      (&tres->range, vw->to_find, vw->nodes, vw->sums, vw->adj_nodes, vw->adj_sums);
 
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }
@@ -584,18 +608,17 @@ static void abort_thieves(kaapi_stealcontext_t* ksc)
 static int common_reducer
 (victim_result_t* vres, thief_result_t* tres)
 {
-  if (tres->j == tres->i) return 0;
-
   if (tres->is_found == true)
   {
     vres->is_found = true;
     return 0;
   }
 
-  printf("reduction: [0, %lu[ [%lu, %lu[\n", vres->j, tres->i, tres->j);
+  printf("reduction: [%lu %lu[ [0, %lu[ [%lu, %lu[\n",
+	 tres->range.beg, tres->range.end, vres->j, tres->i, tres->j);
 
   // compact thief result nodes
-  // [0, vres->j[, [vres->j, tres->i[, [tres->i, tres->j[
+  // [0, vres->j[, [tres->i, tres->j[
   const size_t thief_size = tres->j - tres->i;
   if (thief_size && (vres->j != tres->i))
   {
@@ -608,6 +631,9 @@ static int common_reducer
 
   // accumulate adjacent sum
   vres->adj_sum += tres->adj_sum;
+
+  // work continuation
+  kaapi_workqueue_set(&vres->range, tres->range.beg, tres->range.end);
 
   return 0;
 }
@@ -648,7 +674,7 @@ static bool extract_seq
 {
   kaapi_workqueue_index_t i, j;
   
-  if (kaapi_workqueue_pop(&pw->range, &i, &j, CONFIG_SEQ_GRAIN)) return false;
+  if (kaapi_workqueue_pop(pw->range, &i, &j, CONFIG_SEQ_GRAIN)) return false;
   
   beg = pw->nodes + i;
   end = pw->nodes + j;
@@ -714,7 +740,7 @@ static unsigned int find_shortest_path_par
   victim_result_t res;
 
   // parallel work
-  par_work_t pw(to);
+  par_work_t pw(&res.range, to);
 
   // sequential range
   node_t** pos, **end;
@@ -754,7 +780,7 @@ static unsigned int find_shortest_path_par
     pw.adj_sums = (size_t*)malloc(res.adj_sum * sizeof(size_t));
 
     // commit the parallel work
-    kaapi_workqueue_set(&pw.range, 0, (kaapi_workqueue_index_t)res.j);
+    kaapi_workqueue_set(&res.range, 0, (kaapi_workqueue_index_t)res.j);
 
     if (saved_nodes != NULL) free(saved_nodes);
     if (saved_sums != NULL) free(saved_sums);
@@ -780,7 +806,7 @@ static unsigned int find_shortest_path_par
 	  // ensure no more parallel work, otherwise
 	  // a thief could be missed during abortion
 	  kaapi_steal_setsplitter(ksc, 0, 0);
-	  kaapi_workqueue_set(&pw.range, 0, 0);
+	  kaapi_workqueue_set(pw.range, 0, 0);
 	  goto on_abort;
 	}
 
