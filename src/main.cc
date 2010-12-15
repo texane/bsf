@@ -739,12 +739,12 @@ static unsigned int find_shortest_path_par
   while (res.adj_sum)
   {
     // current layer from next layer
-    prev_nodes = par_work.set_nodes(res.adj_nodes, res.adj_pos);
+    prev_nodes = pw.set_nodes(res.adj_nodes, res.adj_pos);
     if (prev_nodes != NULL) free(prev_nodes);
 
     // next layer from res
-    res.adj_nodes = par_work.adj_nodes;
-    res.adj_pos = malloc(res.adj_sum * sizeof(node_t*));
+    res.adj_nodes = (node_t**)malloc(res.adj_sum * sizeof(node_t*));
+    res.adj_pos = 0;
     res.adj_sum = 0;
 
   continue_par_work:
@@ -764,7 +764,7 @@ static unsigned int find_shortest_path_par
 	  goto on_abort;
 	}
 
-	process_node(*pos, to, res.adj_nodes, res.count);
+	process_node(*pos, to, res.adj_nodes, res.adj_pos, res.adj_sum);
 
       } // endof_seq_loop
 
@@ -793,7 +793,7 @@ static unsigned int find_shortest_path_par
 
  on_done:
   kaapi_task_end_adaptive(ksc);
-  if (par_work.nodes != NULL) free(par_work.nodes);
+  if (pw.nodes != NULL) free(pw.nodes);
   return depth;
 
   // abort the remaining thieves
