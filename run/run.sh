@@ -11,6 +11,7 @@ TO=501
 
 taskset -c 0 ../build/bfs_seq $GRAPH $FROM $TO ;
 
+PROC=1
 for i in `seq 0 $((PROC - 1))`; do
     LD_LIBRARY_PATH=$XKAAPIDIR/lib \
     KAAPI_CPUSET=0:$i \

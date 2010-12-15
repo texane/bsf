@@ -460,7 +460,7 @@ typedef struct par_work
   node_t* to_find;
 
   par_work(node_t* _to_find)
-    : nodes(NULL), to_find(_to_find)
+    : nodes(NULL), sums(NULL), to_find(_to_find)
   {
     kaapi_workqueue_init(&range, 0, 0);
   }
@@ -659,13 +659,15 @@ static void process_node
 
   nodeptr_list::iterator pos = node->adjlist.begin();
   nodeptr_list::iterator end = node->adjlist.end();
+
   for (; pos != end; ++pos)
   {
     if ((*pos)->mark_ifnot() == false) continue ;
 
     // push adjacent node and integrate adjlist size
     res.adj_nodes[res.j] = *pos;
-    res.adj_sums[res.j] += (*pos)->adjlist.size();
+    res.adj_sum += (*pos)->adjlist.size();
+    res.adj_sums[res.j] = res.adj_sum;
     ++res.j;
   }
 }
@@ -805,6 +807,7 @@ static unsigned int find_shortest_path_par
  on_done:
   kaapi_task_end_adaptive(ksc);
   if (pw.nodes != NULL) free(pw.nodes);
+  if (pw.sums != NULL) free(pw.sums);
   return depth;
 
   // abort the remaining thieves
