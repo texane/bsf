@@ -20,7 +20,7 @@ using std::list;
 using std::vector;
 
 
-#define CONFIG_ITER 3
+#define CONFIG_ITER 100
 #define CONFIG_PAR_GRAIN 16
 #define CONFIG_SEQ_GRAIN 16
 
