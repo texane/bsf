@@ -460,10 +460,9 @@ typedef struct par_work
   { kaapi_workqueue_init(&range, 0, 0); }
 
   par_work
-  (node_t* _to_find, node_t** _nodes,
-   kaapi_workqueue_index_t i,
-   kaapi_workqueue_index_t j)
-    : nodes(_nodes), to_find(_to_find)
+  (node_t* _to_find, node_t** _nodes, node_t** _adj_nodes,
+   kaapi_workqueue_index_t i, kaapi_workqueue_index_t j)
+    : nodes(_nodes), adj_nodes(_adj_nodes), to_find(_to_find)
   { kaapi_workqueue_init(&range, i, j); }
 
   node_t** set_nodes(node_t** _nodes, size_t count)
@@ -553,7 +552,7 @@ static int splitter
     // thief work
     par_work_t* const tw = (par_work_t*)kaapi_reply_init_adaptive_task
       (ksc, req, (kaapi_task_body_t)thief_entry, sizeof(par_work_t), ktr);
-    new (tw) par_work_t(vw->to_find, vw->nodes, j - unit_size, j);
+    new (tw) par_work_t(vw->to_find, vw->nodes, vw->adj_nodes, j - unit_size, j);
 
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }
