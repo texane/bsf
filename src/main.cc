@@ -452,7 +452,11 @@ typedef struct par_work
 {
   kaapi_workqueue_t range;
   node_t** volatile nodes;
+  size_t* volatile sums;
+
   node_t** adj_nodes;
+  size_t* adj_sums;
+
   node_t* to_find;
 
   par_work(node_t* _to_find)
@@ -481,25 +485,19 @@ typedef struct par_work
 typedef struct thief_result
 {
   node_t** adj_nodes;
+  size_t* adj_sums;
+  size_t adj_sum;
   size_t i, j;
   bool is_found;
 
-  size_t adj_sum;
+  thief_result(node_t** _adj_nodes, size_t* _adj_sums, size_t _i)
+    : adj_nodes(_adj_nodes), adj_sums(_adj_sums),
+      adj_sum(0), i(_i), j(_i), is_found(false) {}
 
-  thief_result(node_t** _adj_nodes, size_t _i)
-    : adj_nodes(_adj_nodes), i(_i), j(_i), is_found(false), adj_sum(0) {}
+  thief_result() : is_found(false) {}
 } thief_result_t;
 
-typedef struct victim_result
-{
-  node_t** adj_nodes;
-  size_t adj_pos;
-  size_t adj_sum;
-  bool is_found;
-
-  victim_result() : is_found(false) {}
-
-} victim_result_t;
+typedef thief_result_t victim_result_t;
 
 
 // splitter
@@ -577,6 +575,8 @@ static void abort_thieves(kaapi_stealcontext_t* ksc)
 static int common_reducer
 (victim_result_t* vres, thief_result_t* tres)
 {
+  if (tres->j == tres->i) return 0;
+
   if (tres->is_found == true)
   {
     vres->is_found = true;
@@ -584,25 +584,18 @@ static int common_reducer
   }
 
   // compact thief result nodes
-  // [0, vres->adj_pos[, [vres->adj_pos, tres->i[, [tres->i, tres->j[
-
+  // [0, vres->j[, [vres->j, tres->i[, [tres->i, tres->j[
   const size_t thief_size = tres->j - tres->i;
-  const size_t hole_size = tres->i - vres->adj_pos;
-
-  // copy size and offset
-  size_t copy_size = thief_size;
-  size_t copy_off = tres->i;
-
-  if (hole_size < thief_size)
+  if (thief_size && (vres->j != tres->i))
   {
-    copy_size = hole_size;
-    copy_off += thief_size - hole_size;
+    memcpy(vres->adj_nodes + vres->j, vres->adj_nodes + tres->i, thief_size);
+    memcpy(vres->adj_sums + vres->j, vres->adj_nodes + tres->i, thief_size);
   }
 
-  memcpy(vres->adj_nodes + vres->adj_pos, vres->adj_nodes + copy_off, copy_size);
-  vres->adj_pos += thief_size;
+  // adjust index
+  vres->j += thief_size;
 
-  // accumulate adjacent count
+  // accumulate adjacent sum
   vres->adj_sum += tres->adj_sum;
 
   return 0;
@@ -653,11 +646,7 @@ static bool extract_seq
 }
 
 static void process_node
-(
- node_t* node, node_t* to_find,
- node_t* adj_nodes[], size_t& adj_pos,
- size_t& adj_sum
-)
+(node_t* node, node_t* to_find, thief_result_t& res)
 {
   // add adjacent nodes to adj_nodes if not marked
 
@@ -667,9 +656,10 @@ static void process_node
   {
     if ((*pos)->mark_ifnot() == false) continue ;
 
-    // push adjacent node and accumulate adjlist size
-    adj_nodes[adj_pos++] = *pos;
-    adj_sum += (*pos)->adjlist.size();
+    // push adjacent node and integrate adjlist size
+    res.adj_nodes[res.j] = *pos;
+    res.adj_sums[res.j] += (*pos)->adjlist.size();
+    ++res.j;
   }
 }
 
@@ -696,8 +686,7 @@ static void thief_entry
       if (*pos == pw->to_find)
       { res->is_found = true; return ; }
 
-      process_node
-	(*pos, pw->to_find, res->adj_nodes, res->j, adj_sum);
+      process_node(*pos, pw->to_find, res, adj_sum);
     }
   }
 }
@@ -722,36 +711,46 @@ static unsigned int find_shortest_path_par
   // current depth
   unsigned int depth = 0;
 
-  // bootstrap algorithm
+  // bootstrap algorithm: nodes, sums, index
   res.adj_nodes = (node_t**)malloc(sizeof(node_t*));
   res.adj_nodes[0] = from;
-  res.adj_pos = 1;
-  res.adj_sum = from->adjlist.size();
+
+  res.adj_sums = (size_t*)malloc(sizeof(size_t));
+  res.adj_sums[0] = from->adjlist.size();
+
+  res.j = 1;
 
   // enable adaptive stealing
   ksc = kaapi_task_begin_adaptive
     (thread, KAAPI_SC_CONCURRENT | KAAPI_SC_PREEMPTION, splitter, &pw);
 
   // while next level not empty
-  while (res.adj_pos)
+  while (res.j != 0)
   {
     // optim: reuse saved_nodes instead of freeing
 
     // adjacent layer becomes the current one
     node_t** const saved_nodes = pw.nodes;
+    size_t* const saved_sums = pw.sums;
     pw.nodes = res.adj_nodes;
+    pw.sums = res.adj_sums;
 
-    // allocate next layer adj nodes
-    pw.adj_nodes = (node_t**)malloc(res.adj_sum * sizeof(node_t*));
+    // allocate next layer adjacent nodes, sums
+    pw.adj_nodes = (node_t**)malloc(res.adj_sums[res.j - 1] * sizeof(node_t*));
+    pw.adj_sums = (size_t*)malloc(res.adj_sums[res.j - 1] * sizeof(size_t));
 
     // commit the parallel work
-    kaapi_workqueue_set(&pw.range, 0, (kaapi_workqueue_index_t)res.adj_pos);
+    kaapi_workqueue_set(&pw.range, 0, (kaapi_workqueue_index_t)res.j);
 
     if (saved_nodes != NULL) free(saved_nodes);
+    if (saved_sums != NULL) free(saved_sums);
 
     // prepare result with next layer
     res.adj_nodes = pw.adj_nodes;
-    res.adj_pos = 0;
+    res.adj_sums = pw.adj_sums;
+    res.j = 0;
+
+    // initialize adjacent sum to 0
     res.adj_sum = 0;
 
   continue_par_work:
@@ -771,7 +770,7 @@ static unsigned int find_shortest_path_par
 	  goto on_abort;
 	}
 
-	process_node(*pos, to, res.adj_nodes, res.adj_pos, res.adj_sum);
+	process_node(*pos, to, &res);
 
       } // endof_seq_loop
 
