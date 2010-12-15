@@ -612,23 +612,32 @@ static int common_reducer
     return 0;
   }
 
-  // compact thief result nodes
-  // [0, vres->j[, [tres->i, tres->j[
+  // reduce thief adj nodes and sums
+  // todo: should be done in parallel
   const size_t thief_size = tres->j - tres->i;
   if (thief_size && (vres->j != tres->i))
   {
-    memcpy(vres->adj_nodes + vres->j, vres->adj_nodes + tres->i, thief_size * sizeof(node_t*));
-    memcpy(vres->adj_sums + vres->j, vres->adj_sums + tres->i, thief_size * sizeof(size_t));
+    for (size_t i = 0; i < thief_size; ++i)
+    {
+      vres->adj_nodes[vres->j + i] = tres->adj_nodes[tres->i + i];
+      vres->adj_sums[vres->j + i] = tres->adj_sums[tres->i + i] + vres->adj_sum;
+    }
   }
-
-  // adjust index
-  vres->j += thief_size;
+  else if (vres->j == tres->i)
+  {
+    for (size_t i = 0; i < thief_size; ++i)
+      vres->adj_sums[vres->j + i] += vres->adj_sum;
+  }
 
   // accumulate adjacent sum
   vres->adj_sum += tres->adj_sum;
 
+  // adjust index
+  vres->j += thief_size;
+
   // work continuation
-  kaapi_workqueue_set(&vres->range, tres->range.beg, tres->range.end);
+  if (tres->range.beg != tres->range.end)
+    kaapi_workqueue_set(&vres->range, tres->range.beg, tres->range.end);
 
   return 0;
 }
