@@ -461,20 +461,27 @@ typedef struct par_work
 
   par_work(node_t* _to_find)
     : nodes(NULL), to_find(_to_find)
-  { kaapi_workqueue_init(&range, 0, 0); }
+  {
+    kaapi_workqueue_init(&range, 0, 0);
+  }
 
   par_work
-  (node_t* _to_find, node_t** _nodes, node_t** _adj_nodes,
-   kaapi_workqueue_index_t i, kaapi_workqueue_index_t j)
-    : nodes(_nodes), adj_nodes(_adj_nodes), to_find(_to_find)
-  { kaapi_workqueue_init(&range, i, j); }
-
-  node_t** set_nodes(node_t** _nodes, size_t count)
+  (
+   node_t* _to_find,
+   node_t** _nodes, size_t* _sums,
+   node_t** _adj_nodes, size_t* _adj_sums,
+   kaapi_workqueue_index_t i, kaapi_workqueue_index_t j
+  )
   {
-    node_t** const prev_nodes = nodes;
+    to_find = _to_find;
+
     nodes = _nodes;
-    kaapi_workqueue_init(&range, 0, (kaapi_workqueue_index_t)count);
-    return prev_nodes;
+    sums = _sums;
+
+    adj_nodes = _adj_nodes;
+    adj_sums = _adj_sums;
+
+    kaapi_workqueue_init(&range, i, j);
   }
 
 } par_work_t;
@@ -503,8 +510,6 @@ typedef thief_result_t victim_result_t;
 // splitter
 
 static void thief_entry(void*, kaapi_thread_t*, kaapi_stealcontext_t*);
-
-static size_t index_to_adj_index(size_t) { return 0; }
 
 static int splitter
 (kaapi_stealcontext_t* ksc, int nreq, kaapi_request_t* req, void* args)
@@ -545,12 +550,14 @@ static int splitter
     // thief result
     kaapi_taskadaptive_result_t* const ktr =
       kaapi_allocate_thief_result(req, sizeof(thief_result_t), NULL);
-    new (ktr->data) thief_result_t(vw->adj_nodes, index_to_adj_index(j - unit_size));
+    new (ktr->data) thief_result_t
+      (vw->adj_nodes, vw->adj_sums, vw->sums[j - unit_size]);
 
     // thief work
     par_work_t* const tw = (par_work_t*)kaapi_reply_init_adaptive_task
       (ksc, req, (kaapi_task_body_t)thief_entry, sizeof(par_work_t), ktr);
-    new (tw) par_work_t(vw->to_find, vw->nodes, vw->adj_nodes, j - unit_size, j);
+    new (tw) par_work_t
+      (vw->to_find, vw->nodes, vw->sums, vw->adj_nodes, vw->adj_sums, j - unit_size, j);
 
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }
@@ -672,8 +679,6 @@ static void thief_entry
   // enable stealing
   kaapi_steal_setsplitter(ksc, splitter, pw);
 
-  size_t adj_sum = 0;
-
   node_t** pos, **end;
   while (extract_seq(pw, pos, end) == true)
   {
@@ -686,7 +691,7 @@ static void thief_entry
       if (*pos == pw->to_find)
       { res->is_found = true; return ; }
 
-      process_node(*pos, pw->to_find, res, adj_sum);
+      process_node(*pos, pw->to_find, *res);
     }
   }
 }
@@ -770,7 +775,7 @@ static unsigned int find_shortest_path_par
 	  goto on_abort;
 	}
 
-	process_node(*pos, to, &res);
+	process_node(*pos, to, res);
 
       } // endof_seq_loop
 
