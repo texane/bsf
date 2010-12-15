@@ -720,9 +720,6 @@ static unsigned int find_shortest_path_par
   // sequential range
   node_t** pos, **end;
 
-  // previous layer to delete
-  node_t** prev_nodes;
-
   // current depth
   unsigned int depth = 0;
 
@@ -735,15 +732,26 @@ static unsigned int find_shortest_path_par
   // enable adaptive stealing
   ksc = kaapi_task_begin_adaptive
     (thread, KAAPI_SC_CONCURRENT | KAAPI_SC_PREEMPTION, splitter, &pw);
-  // while next level not empty
-  while (res.adj_sum)
-  {
-    // current layer from next layer
-    prev_nodes = pw.set_nodes(res.adj_nodes, res.adj_pos);
-    if (prev_nodes != NULL) free(prev_nodes);
 
-    // next layer from res
-    res.adj_nodes = (node_t**)malloc(res.adj_sum * sizeof(node_t*));
+  // while next level not empty
+  while (res.adj_pos)
+  {
+    // optim: reuse saved_nodes instead of freeing
+
+    // adjacent layer becomes the current one
+    node_t** const saved_nodes = pw.nodes;
+    pw.nodes = res.adj_nodes;
+
+    // allocate next layer adj nodes
+    pw.adj_nodes = (node_t**)malloc(res.adj_sum * sizeof(node_t*));
+
+    // commit the parallel work
+    kaapi_workqueue_set(&pw.range, 0, (kaapi_workqueue_index_t)res.adj_pos);
+
+    if (saved_nodes != NULL) free(saved_nodes);
+
+    // prepare result with next layer
+    res.adj_nodes = pw.adj_nodes;
     res.adj_pos = 0;
     res.adj_sum = 0;
 
