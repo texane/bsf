@@ -577,8 +577,6 @@ static int splitter
     new (tres) thief_result_t
       (j - unit_size, j, vw->adj_nodes, vw->adj_sums, vw->sums[j - unit_size]);
 
-    printf("split: [%lu, %lu[ -> [%lu, %lu[\n", j - unit_size, j, vw->sums[j - unit_size], vw->sums[j - 1]);
-
     // thief work
     par_work_t* const tw = (par_work_t*)kaapi_reply_init_adaptive_task
       (ksc, req, (kaapi_task_body_t)thief_entry, sizeof(par_work_t), ktr);
@@ -614,16 +612,13 @@ static int common_reducer
     return 0;
   }
 
-  printf("reduction: [%lu %lu[ [0, %lu[ [%lu, %lu[\n",
-	 tres->range.beg, tres->range.end, vres->j, tres->i, tres->j);
-
   // compact thief result nodes
   // [0, vres->j[, [tres->i, tres->j[
   const size_t thief_size = tres->j - tres->i;
   if (thief_size && (vres->j != tres->i))
   {
-    memcpy(vres->adj_nodes + vres->j, vres->adj_nodes + tres->i, thief_size);
-    memcpy(vres->adj_sums + vres->j, vres->adj_sums + tres->i, thief_size);
+    memcpy(vres->adj_nodes + vres->j, vres->adj_nodes + tres->i, thief_size * sizeof(node_t*));
+    memcpy(vres->adj_sums + vres->j, vres->adj_sums + tres->i, thief_size * sizeof(size_t));
   }
 
   // adjust index
@@ -675,10 +670,10 @@ static bool extract_seq
   kaapi_workqueue_index_t i, j;
   
   if (kaapi_workqueue_pop(pw->range, &i, &j, CONFIG_SEQ_GRAIN)) return false;
-  
+
   beg = pw->nodes + i;
   end = pw->nodes + j;
-  
+
   return true;
 }
 
@@ -772,8 +767,6 @@ static unsigned int find_shortest_path_par
     size_t* const saved_sums = pw.sums;
     pw.nodes = res.adj_nodes;
     pw.sums = res.adj_sums;
-
-    printf("-- layer %u: %lu nodes, %lu max adjacent\n", depth, res.j, res.adj_sum);
 
     // allocate next layer adjacent nodes, sums
     pw.adj_nodes = (node_t**)malloc(res.adj_sum * sizeof(node_t*));
