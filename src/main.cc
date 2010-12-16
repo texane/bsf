@@ -711,11 +711,13 @@ static void thief_entry
 {
   par_work_t* const pw = (par_work_t*)args;
   thief_result_t* const res = (thief_result_t*)kaapi_adaptive_result_data(ksc);
+  kaapi_taskadaptive_result_t* ktr;
 
   // enable stealing
   kaapi_steal_setsplitter(ksc, splitter, pw);
 
   node_t** pos, **end;
+ continue_par_work:
   while (extract_seq(pw, pos, end) == true)
   {
     const unsigned int is_preempted = kaapi_preemptpoint
@@ -725,11 +727,23 @@ static void thief_entry
     for (; pos != end; ++pos)
     {
       if (*pos == pw->to_find)
-      { res->is_found = true; return ; }
+      { res->is_found = true; goto on_abort; }
 
       process_node(*pos, pw->to_find, *res);
     }
   }
+
+  // par_work_done. preempt and continue thieves
+  if ((ktr = kaapi_get_thief_head(ksc)) != NULL)
+  {
+    kaapi_preempt_thief(ksc, ktr, NULL, victim_reducer, (void*)res);
+    if (res->is_found == true) goto on_abort;
+    goto continue_par_work;
+  }
+  return ;
+
+ on_abort:
+  abort_thieves(ksc);
 }
 
 static unsigned int find_shortest_path_par
@@ -778,8 +792,13 @@ static unsigned int find_shortest_path_par
     pw.sums = res.adj_sums;
 
     // allocate next layer adjacent nodes, sums
-    pw.adj_nodes = (node_t**)malloc(res.adj_sum * sizeof(node_t*));
-    pw.adj_sums = (size_t*)malloc(res.adj_sum * sizeof(size_t));
+    pw.adj_nodes = NULL;
+    pw.adj_sums = NULL;
+    if (res.adj_sum)
+    {
+      pw.adj_nodes = (node_t**)malloc(res.adj_sum * sizeof(node_t*));
+      pw.adj_sums = (size_t*)malloc(res.adj_sum * sizeof(size_t));
+    }
 
     // commit the parallel work
     kaapi_workqueue_set(&res.range, 0, (kaapi_workqueue_index_t)res.j);
