@@ -21,9 +21,83 @@ using std::vector;
 
 
 #define CONFIG_ITER 100
-#define CONFIG_PAR_GRAIN 4
-#define CONFIG_SEQ_GRAIN 4
+#define CONFIG_PAR_GRAIN 8
+#define CONFIG_SEQ_GRAIN 8
 
+#if CONFIG_PARALLEL
+# define CONFIG_USE_TLS 0
+#endif
+
+
+#if CONFIG_USE_TLS
+
+struct tls
+{
+  double work_usecs;
+  double reducer_usecs;
+  double splitter_usecs;
+  unsigned int node_count;
+
+  void clear()
+  {
+    work_usecs = 0.f;
+    reducer_usecs = 0.f;
+    splitter_usecs = 0.f;
+    node_count = 0;
+  }
+
+  tls() { clear(); }
+
+  struct tls& operator+=(const struct tls& r)
+  {
+    work_usecs += r.work_usecs;
+    reducer_usecs += r.reducer_usecs;
+    splitter_usecs += r.splitter_usecs;
+    node_count += r.node_count;
+    return *this;
+  }
+};
+
+#define CONFIG_TLS_COUNT 128
+static struct tls _tls[CONFIG_TLS_COUNT];
+
+extern "C" unsigned int kaapi_get_self_kid(void);
+
+inline static struct tls& self_tls()
+{
+  return _tls[kaapi_get_self_kid()];
+}
+
+static void __attribute__((unused))
+reduce_clear_tls(struct tls& res)
+{
+  for (size_t i = 0; i < CONFIG_TLS_COUNT; ++i)
+  { res += _tls[i]; _tls[i].clear(); }
+}
+
+struct krono
+{
+  struct timeval tms[3];
+
+  void start()
+  { gettimeofday(&tms[0], NULL); }
+
+  void stop()
+  { gettimeofday(&tms[1], NULL); }
+
+  double usecs() const
+  {
+    struct timeval tm;
+    timersub(&tms[1], &tms[0], &tm);
+    return (double)tm.tv_sec * 1E6 +
+      (double)tm.tv_usec;
+  }
+};
+
+#endif // CONFIG_USE_TLS
+
+
+// list with a size in O(1)
 
 template<typename T>
 struct list_with_size : public list<T>
@@ -533,6 +607,10 @@ static void thief_entry(void*, kaapi_thread_t*, kaapi_stealcontext_t*);
 static int splitter
 (kaapi_stealcontext_t* ksc, int nreq, kaapi_request_t* req, void* args)
 {
+#if CONFIG_USE_TLS
+  krono kro; kro.start();
+#endif
+
   par_work_t* const vw = (par_work_t*)args;
 
   // stolen range
@@ -549,7 +627,7 @@ static int splitter
   // do not steal if range size <= PAR_GRAIN
   range_size = kaapi_workqueue_size(vw->range);
   if (range_size <= CONFIG_PAR_GRAIN)
-    return 0;
+    goto on_done;
 
   // how much per req
   unit_size = range_size / (nreq + 1);
@@ -581,6 +659,13 @@ static int splitter
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }
 
+ on_done:
+
+#if CONFIG_USE_TLS
+  kro.stop();
+  self_tls().splitter_usecs += kro.usecs();
+#endif
+
   return nrep;
 }
 
@@ -606,6 +691,10 @@ static int common_reducer
     vres->is_found = true;
     return 0;
   }
+
+#if CONFIG_USE_TLS
+  krono kro; kro.start();
+#endif
 
   // reduce thief adj nodes and sums
   // todo: should be done in parallel
@@ -633,6 +722,11 @@ static int common_reducer
   // work continuation
   if (tres->range.beg != tres->range.end)
     kaapi_workqueue_set(&vres->range, tres->range.beg, tres->range.end);
+
+#if CONFIG_USE_TLS
+  kro.stop();
+  self_tls().reducer_usecs += kro.usecs();
+#endif
 
   return 0;
 }
@@ -719,13 +813,32 @@ static void thief_entry
       (ksc, NULL, NULL, NULL, 0, NULL);
     if (is_preempted) return ;
 
+#if CONFIG_USE_TLS
+    self_tls().node_count += end - pos;
+    krono kro; kro.start();
+#endif
+
     for (; pos != end; ++pos)
     {
       if (*pos == pw->to_find)
-      { res->is_found = true; goto on_abort; }
+      {
+	res->is_found = true;
+
+#if CONFIG_USE_TLS
+	kro.stop();
+	self_tls().work_usecs += kro.usecs();
+#endif
+
+	goto on_abort;
+      }
 
       process_node(*pos, pw->to_find, *res);
     }
+
+#if CONFIG_USE_TLS
+    kro.stop();
+    self_tls().work_usecs += kro.usecs();
+#endif
   }
 
   // par_work_done. preempt and continue thieves
@@ -813,12 +926,22 @@ static unsigned int find_shortest_path_par
     // extract_seq
     while (extract_seq(&pw, pos, end) == true)
     {
+#if CONFIG_USE_TLS
+      self_tls().node_count += end - pos;
+      krono kro; kro.start();
+#endif
+
       // seq_loop
       for (; pos != end; ++pos)
       {
 	// if found, abort thieves
 	if (*pos == to)
 	{
+#if CONFIG_USE_TLS
+	  kro.stop();
+	  self_tls().work_usecs += kro.usecs();
+#endif
+
 	  // ensure no more parallel work, otherwise
 	  // a thief could be missed during abortion
 	  kaapi_steal_setsplitter(ksc, 0, 0);
@@ -829,6 +952,11 @@ static unsigned int find_shortest_path_par
 	process_node(*pos, to, res);
 
       } // endof_seq_loop
+
+#if CONFIG_USE_TLS
+      kro.stop();
+      self_tls().work_usecs += kro.usecs();
+#endif
 
     } // endof_extract_seq
 
@@ -916,24 +1044,43 @@ int main(int ac, char** av)
   from = g.at(atoi(av[2]));
   to = g.at(atoi(av[3]));
 
-  unsigned int depth;
   double usecs = 0.f;
+
+#if CONFIG_USE_TLS
+  struct tls reduced_tls;
+#endif
 
   for (unsigned int iter = 0; iter < CONFIG_ITER; ++iter)
   {
     g.unmark_nodes();
     gettimeofday(&tms[0], NULL);
 #if CONFIG_SEQUENTIAL
-    depth = find_shortest_path_seq(g, from, to);
+    find_shortest_path_seq(g, from, to);
 #elif CONFIG_PARALLEL
-    depth = find_shortest_path_par(g, from, to);
+    find_shortest_path_par(g, from, to);
 #endif
     gettimeofday(&tms[1], NULL);
     timersub(&tms[1], &tms[0], &tms[2]);
     usecs += (double)tms[2].tv_sec * 1E6 + (double)tms[2].tv_usec;
+
+#if CONFIG_USE_TLS
+    // reduce_clear_tls(reduced_tls);
+#endif
   }
 
-  printf("%u %lf\n", depth, usecs / CONFIG_ITER);
+  printf("%lf", usecs / CONFIG_ITER);
+
+#if CONFIG_USE_TLS
+# if 0
+  printf(" %lf %lf %lf",
+	 reduced_tls.reducer_usecs / CONFIG_ITER,
+	 reduced_tls.splitter_usecs / CONFIG_ITER,
+	 reduced_tls.work_usecs / CONFIG_ITER);
+# else
+  for (size_t i = 0; i < (size_t)kaapi_getconcurrency(); ++i)
+    printf(" %u", _tls[i].node_count / CONFIG_ITER);
+# endif
+#endif
 
   finalize_stuff();
 
