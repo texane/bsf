@@ -15,6 +15,10 @@
 #include <time.h>
 #include <sys/time.h>
 
+#if CONFIG_PARALLEL
+# include "kaapi.h"
+#endif
+
 
 using std::list;
 using std::vector;
@@ -25,7 +29,7 @@ using std::vector;
 #define CONFIG_SEQ_GRAIN 8
 
 #if CONFIG_PARALLEL
-# define CONFIG_USE_TLS 0
+# define CONFIG_USE_TLS 1
 #endif
 
 
@@ -514,8 +518,6 @@ static unsigned int find_shortest_path_seq
 
 
 #if CONFIG_PARALLEL // parallel version
-
-#include "kaapi.h"
 
 // parallel work type
 
