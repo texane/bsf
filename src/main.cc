@@ -21,8 +21,8 @@ using std::vector;
 
 
 #define CONFIG_ITER 100
-#define CONFIG_PAR_GRAIN 16
-#define CONFIG_SEQ_GRAIN 16
+#define CONFIG_PAR_GRAIN 4
+#define CONFIG_SEQ_GRAIN 4
 
 
 template<typename T>
@@ -464,23 +464,19 @@ typedef struct par_work
     : range(_range), nodes(NULL), sums(NULL), to_find(_to_find)
   {}
 
-  par_work
-  (
-   kaapi_workqueue_t* _range,
-   node_t* _to_find,
-   node_t** _nodes, size_t* _sums,
-   node_t** _adj_nodes, size_t* _adj_sums
-  )
+  par_work(struct par_work* pw, kaapi_workqueue_t* _range)
   {
+    // fork constructor
+
+    to_find = pw->to_find;
+
+    nodes = pw->nodes;
+    sums = pw->sums;
+
+    adj_nodes = pw->adj_nodes;
+    adj_sums = pw->adj_sums;
+
     range = _range;
-
-    to_find = _to_find;
-
-    nodes = _nodes;
-    sums = _sums;
-
-    adj_nodes = _adj_nodes;
-    adj_sums = _adj_sums;
   }
 
 } par_work_t;
@@ -580,8 +576,7 @@ static int splitter
     // thief work
     par_work_t* const tw = (par_work_t*)kaapi_reply_init_adaptive_task
       (ksc, req, (kaapi_task_body_t)thief_entry, sizeof(par_work_t), ktr);
-    new (tw) par_work_t
-      (&tres->range, vw->to_find, vw->nodes, vw->sums, vw->adj_nodes, vw->adj_sums);
+    new (tw) par_work_t(vw, &tres->range);
 
     kaapi_reply_pushhead_adaptive_task(ksc, req);
   }
