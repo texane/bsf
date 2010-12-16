@@ -61,8 +61,6 @@ struct tls
 #define CONFIG_TLS_COUNT 128
 static struct tls _tls[CONFIG_TLS_COUNT];
 
-extern "C" unsigned int kaapi_get_self_kid(void);
-
 inline static struct tls& self_tls()
 {
   return _tls[kaapi_get_self_kid()];
@@ -89,8 +87,7 @@ struct krono
   {
     struct timeval tm;
     timersub(&tms[1], &tms[0], &tm);
-    return (double)tm.tv_sec * 1E6 +
-      (double)tm.tv_usec;
+    return (double)tm.tv_sec * 1E6 + (double)tm.tv_usec;
   }
 };
 
